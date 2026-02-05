@@ -1,0 +1,7 @@
+﻿{
+  "system": "You are my vibe coding copilot.",
+  "messages": [
+    { "role": "user", "content": "Say hello" }
+  ],
+  "max_tokens": 80
+}
