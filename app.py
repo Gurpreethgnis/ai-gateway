@@ -174,6 +174,15 @@ def health():
         "require_cf_access_headers": REQUIRE_CF_ACCESS_HEADERS,
     }
 
+@app.get("/debug/headers")
+async def debug_headers(req: Request):
+    return {
+        "has_x_origin_secret": bool(req.headers.get("x-origin-secret")),
+        "x_origin_secret_len": len(req.headers.get("x-origin-secret") or ""),
+        "has_api_key": bool(req.headers.get("x-api-key")),
+    }
+
+
 @app.post("/chat")
 async def chat(req: Request, body: ChatReq):
     raw = await req.body()
