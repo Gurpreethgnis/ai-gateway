@@ -1,6 +1,7 @@
 import os
 import json
 import hashlib
+import traceback
 from typing import Any, Optional, List, Dict
 
 from fastapi import FastAPI, HTTPException, Request
@@ -21,20 +22,15 @@ app = FastAPI()
 # SECURITY CONFIG
 # =====================================================
 
-# App-level API key (required)
 GATEWAY_API_KEY = os.getenv("GATEWAY_API_KEY")
 if not GATEWAY_API_KEY:
-    raise RuntimeError(
-        "GATEWAY_API_KEY is not set. Set it in Railway environment variables."
-    )
+    raise RuntimeError("GATEWAY_API_KEY is not set. Set it in Railway env vars.")
 
-# Cloudflare-only origin secret injected by Transform Rule (recommended)
-# Cloudflare Transform Rule should inject:
+# Cloudflare Transform Rule injects:
 #   X-Origin-Secret: <secret>
-ORIGIN_SECRET = os.getenv("ORIGIN_SECRET")  # set this in Railway (recommended)
+ORIGIN_SECRET = os.getenv("ORIGIN_SECRET")  # set in Railway (recommended)
 
-# Optional: enforce presence of CF Access client headers at app layer
-# (Cloudflare Access already enforces upstream, so this is optional)
+# Optional (usually unnecessary) extra enforcement at app layer
 REQUIRE_CF_ACCESS_HEADERS = os.getenv("REQUIRE_CF_ACCESS_HEADERS", "0") == "1"
 
 # =====================================================
@@ -61,7 +57,7 @@ if REDIS_URL and redis is not None:
         rds = None
 
 # =====================================================
-# ERROR HARDENING
+# ERROR HARDENING (WITH LOGGING)
 # =====================================================
 
 @app.exception_handler(HTTPException)
@@ -69,8 +65,10 @@ async def http_exception_handler(_: Request, exc: HTTPException):
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 @app.exception_handler(Exception)
-async def unhandled_exception_handler(_: Request, __: Exception):
-    # Don't leak internals to clients; inspect Railway logs for details.
+async def unhandled_exception_handler(_: Request, exc: Exception):
+    # Log full stack trace to Railway logs
+    print("UNHANDLED EXCEPTION:", repr(exc))
+    print(traceback.format_exc())
     return JSONResponse(status_code=500, content={"detail": "Internal error"})
 
 # =====================================================
@@ -85,7 +83,7 @@ async def security_middleware(request: Request, call_next):
         if got != ORIGIN_SECRET:
             raise HTTPException(status_code=403, detail="Forbidden")
 
-    # 2) Optional: additional enforcement of CF Access client headers at app layer
+    # 2) Optional: enforce CF Access headers at app layer
     if REQUIRE_CF_ACCESS_HEADERS:
         cf_id = request.headers.get("cf-access-client-id")
         cf_secret = request.headers.get("cf-access-client-secret")
@@ -133,7 +131,6 @@ def is_hard_task(text: str) -> bool:
 def route_model(req: ChatReq) -> str:
     if req.model:
         return req.model
-
     joined = "\n".join(m.content for m in req.messages if m.role == "user")[:8000]
     return OPUS_MODEL if is_hard_task(joined) else DEFAULT_MODEL
 
@@ -142,7 +139,7 @@ def cache_key(payload: Dict[str, Any]) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 def cache_get(key: str):
-    if not rds:
+    if rds is None:
         return None
     try:
         v = rds.get(key)
@@ -151,12 +148,11 @@ def cache_get(key: str):
         return None
 
 def cache_set(key: str, data: Dict[str, Any], ttl: int):
-    if not rds:
+    if rds is None:
         return
     try:
         rds.setex(key, ttl, json.dumps(data))
     except Exception:
-        # Cache failures should never break requests
         pass
 
 # =====================================================
@@ -167,7 +163,7 @@ def cache_set(key: str, data: Dict[str, Any], ttl: int):
 def health():
     return {
         "ok": True,
-        "redis": bool(rds),
+        "redis": (rds is not None),
         "default_model": DEFAULT_MODEL,
         "opus_model": OPUS_MODEL,
         "origin_lockdown": bool(ORIGIN_SECRET),
@@ -205,7 +201,6 @@ async def chat(req: Request, body: ChatReq):
     try:
         resp = client.messages.create(**payload)
     except Exception:
-        # Don't leak provider internals directly; inspect logs
         raise HTTPException(status_code=502, detail="Upstream model error")
 
     text = "".join(
@@ -219,12 +214,7 @@ async def chat(req: Request, body: ChatReq):
     except Exception:
         usage = None
 
-    data = {
-        "cached": False,
-        "model": model,
-        "text": text,
-        "usage": usage,
-    }
+    data = {"cached": False, "model": model, "text": text, "usage": usage}
 
     if key:
         cache_set(key, data, CACHE_TTL_SECONDS)
