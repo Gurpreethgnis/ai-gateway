@@ -77,27 +77,31 @@ async def unhandled_exception_handler(_: Request, exc: Exception):
 
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
-    # 1) Origin lockdown: require Cloudflare-injected secret header (if configured)
-    if ORIGIN_SECRET:
-        got = request.headers.get("x-origin-secret")
-        if got != ORIGIN_SECRET:
-            raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        # 1) Origin lockdown
+        if ORIGIN_SECRET:
+            got = request.headers.get("x-origin-secret")
+            if got != ORIGIN_SECRET:
+                raise HTTPException(status_code=403, detail="Forbidden")
 
-    # 2) Optional: enforce CF Access headers at app layer
-    if REQUIRE_CF_ACCESS_HEADERS:
-        cf_id = request.headers.get("cf-access-client-id")
-        cf_secret = request.headers.get("cf-access-client-secret")
-        if not cf_id or not cf_secret:
-            raise HTTPException(status_code=401, detail="Missing Cloudflare Access headers")
+        # 2) Optional CF headers enforcement
+        if REQUIRE_CF_ACCESS_HEADERS:
+            cf_id = request.headers.get("cf-access-client-id")
+            cf_secret = request.headers.get("cf-access-client-secret")
+            if not cf_id or not cf_secret:
+                raise HTTPException(status_code=401, detail="Missing Cloudflare Access headers")
 
-    # 3) Require X-API-Key for all requests
-    api_key = request.headers.get("x-api-key")
-    if not api_key:
-        raise HTTPException(status_code=401, detail="X-API-Key required")
-    if api_key != GATEWAY_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid API key")
+        # 3) API key
+        api_key = request.headers.get("x-api-key")
+        if not api_key:
+            raise HTTPException(status_code=401, detail="X-API-Key required")
+        if api_key != GATEWAY_API_KEY:
+            raise HTTPException(status_code=403, detail="Invalid API key")
 
-    return await call_next(request)
+        return await call_next(request)
+
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 # =====================================================
 # MODELS
