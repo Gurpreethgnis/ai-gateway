@@ -78,27 +78,18 @@ async def unhandled_exception_handler(_: Request, exc: Exception):
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
     try:
-        path = request.url.path
+        # 1) Origin lockdown (Cloudflare → Railway only)
+        if ORIGIN_SECRET:
+            got = request.headers.get("x-origin-secret")
+            if got != ORIGIN_SECRET:
+                raise HTTPException(status_code=403, detail="Forbidden")
 
-        # 1) API key (always required, even for /debug/*)
+        # 2) API key (client auth)
         api_key = request.headers.get("x-api-key")
         if not api_key:
             raise HTTPException(status_code=401, detail="X-API-Key required")
         if api_key != GATEWAY_API_KEY:
             raise HTTPException(status_code=403, detail="Invalid API key")
-
-        # 2) Optional CF headers enforcement
-        if REQUIRE_CF_ACCESS_HEADERS:
-            cf_id = request.headers.get("cf-access-client-id")
-            cf_secret = request.headers.get("cf-access-client-secret")
-            if not cf_id or not cf_secret:
-                raise HTTPException(status_code=401, detail="Missing Cloudflare Access headers")
-
-        # 3) Origin lockdown (skip only for /debug/*)
-        if ORIGIN_SECRET and not path.startswith("/debug/"):
-            got = request.headers.get("x-origin-secret")
-            if got != ORIGIN_SECRET:
-                raise HTTPException(status_code=403, detail="Forbidden")
 
         return await call_next(request)
 
