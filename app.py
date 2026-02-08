@@ -78,11 +78,14 @@ async def unhandled_exception_handler(_: Request, exc: Exception):
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
     try:
-        # 1) Origin lockdown
-        if ORIGIN_SECRET:
-            got = request.headers.get("x-origin-secret")
-            if got != ORIGIN_SECRET:
-                raise HTTPException(status_code=403, detail="Forbidden")
+        path = request.url.path
+
+        # 1) API key (always required, even for /debug/*)
+        api_key = request.headers.get("x-api-key")
+        if not api_key:
+            raise HTTPException(status_code=401, detail="X-API-Key required")
+        if api_key != GATEWAY_API_KEY:
+            raise HTTPException(status_code=403, detail="Invalid API key")
 
         # 2) Optional CF headers enforcement
         if REQUIRE_CF_ACCESS_HEADERS:
@@ -91,17 +94,17 @@ async def security_middleware(request: Request, call_next):
             if not cf_id or not cf_secret:
                 raise HTTPException(status_code=401, detail="Missing Cloudflare Access headers")
 
-        # 3) API key
-        api_key = request.headers.get("x-api-key")
-        if not api_key:
-            raise HTTPException(status_code=401, detail="X-API-Key required")
-        if api_key != GATEWAY_API_KEY:
-            raise HTTPException(status_code=403, detail="Invalid API key")
+        # 3) Origin lockdown (skip only for /debug/*)
+        if ORIGIN_SECRET and not path.startswith("/debug/"):
+            got = request.headers.get("x-origin-secret")
+            if got != ORIGIN_SECRET:
+                raise HTTPException(status_code=403, detail="Forbidden")
 
         return await call_next(request)
 
     except HTTPException as exc:
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
 
 # =====================================================
 # MODELS
