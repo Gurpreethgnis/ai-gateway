@@ -174,6 +174,11 @@ def health():
         "require_cf_access_headers": REQUIRE_CF_ACCESS_HEADERS,
     }
 
+@app.get("/debug/origin")
+async def debug_origin(req: Request):
+    v = req.headers.get("x-origin-secret")
+    return {"has_x_origin_secret": bool(v), "len": len(v or "")}
+
 @app.get("/debug/headers")
 async def debug_headers(req: Request):
     return {
