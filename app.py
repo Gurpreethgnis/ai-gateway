@@ -1,5 +1,3 @@
-```python
-# app.py
 import os
 import json
 import hashlib
@@ -23,21 +21,18 @@ app = FastAPI()
 # SECURITY CONFIG
 # =====================================================
 
-# App-level API key (required)
 GATEWAY_API_KEY = os.getenv("GATEWAY_API_KEY")
 if not GATEWAY_API_KEY:
     raise RuntimeError(
-        "GATEWAY_API_KEY is not set. "
-        "Set it in Railway environment variables."
+        "GATEWAY_API_KEY is not set. Set it in Railway environment variables."
     )
 
-# Optional: Cloudflare-only origin secret header (recommended for origin lockdown)
-# If set, Cloudflare must inject:
-#   X-CF-Origin-Secret: <CF_ORIGIN_SECRET>
-CF_ORIGIN_SECRET = os.getenv("CF_ORIGIN_SECRET")  # optional but strongly recommended
+# Recommended: Cloudflare-only origin secret injected by Transform Rule
+# Cloudflare should inject:
+#   X-Origin-Secret: <secret>
+ORIGIN_SECRET = os.getenv("ORIGIN_SECRET")  # set this in Railway
 
-# Optional: If you still want to enforce presence of CF Access client headers at app layer
-# (Cloudflare Access normally handles this before requests reach origin).
+# Optional: enforce presence of CF Access client headers at app layer
 REQUIRE_CF_ACCESS_HEADERS = os.getenv("REQUIRE_CF_ACCESS_HEADERS", "0") == "1"
 
 # =====================================================
@@ -69,12 +64,10 @@ if REDIS_URL and redis is not None:
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(_: Request, exc: HTTPException):
-    # Ensure HTTPExceptions always return clean JSON (no accidental 500 propagation).
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(_: Request, __: Exception):
-    # Avoid leaking internals; log via your platform logs.
     return JSONResponse(status_code=500, content={"detail": "Internal error"})
 
 # =====================================================
@@ -83,13 +76,13 @@ async def unhandled_exception_handler(_: Request, __: Exception):
 
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
-    # 1) Optional origin lockdown: require CF-injected secret header
-    if CF_ORIGIN_SECRET:
-        origin_secret = request.headers.get("x-cf-origin-secret")
-        if origin_secret != CF_ORIGIN_SECRET:
+    # 1) Origin lockdown: require Cloudflare-injected secret header (if configured)
+    if ORIGIN_SECRET:
+        got = request.headers.get("x-origin-secret")
+        if got != ORIGIN_SECRET:
             raise HTTPException(status_code=403, detail="Forbidden")
 
-    # 2) Optional additional enforcement of CF Access headers at app layer
+    # 2) Optional: additional enforcement of CF Access client headers at app layer
     if REQUIRE_CF_ACCESS_HEADERS:
         cf_id = request.headers.get("cf-access-client-id")
         cf_secret = request.headers.get("cf-access-client-secret")
@@ -138,10 +131,7 @@ def route_model(req: ChatReq) -> str:
     if req.model:
         return req.model
 
-    joined = "\n".join(
-        m.content for m in req.messages if m.role == "user"
-    )[:8000]
-
+    joined = "\n".join(m.content for m in req.messages if m.role == "user")[:8000]
     return OPUS_MODEL if is_hard_task(joined) else DEFAULT_MODEL
 
 def cache_key(payload: Dict[str, Any]) -> str:
@@ -158,84 +148,4 @@ def cache_get(key: str):
         return None
 
 def cache_set(key: str, data: Dict[str, Any], ttl: int):
-    if rds:
-        try:
-            rds.setex(key, ttl, json.dumps(data))
-        except Exception:
-            # Cache failures should never take down requests
-            pass
-
-# =====================================================
-# ROUTES
-# =====================================================
-
-@app.get("/health")
-def health():
-    return {
-        "ok": True,
-        "redis": bool(rds),
-        "default_model": DEFAULT_MODEL,
-        "opus_model": OPUS_MODEL,
-        "origin_lockdown": bool(CF_ORIGIN_SECRET),
-        "require_cf_access_headers": REQUIRE_CF_ACCESS_HEADERS,
-    }
-
-@app.post("/chat")
-async def chat(req: Request, body: ChatReq):
-    raw = await req.body()
-    if len(raw) > MAX_BODY_BYTES:
-        raise HTTPException(status_code=413, detail="Payload too large")
-
-    if not client:
-        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set")
-
-    model = route_model(body)
-
-    payload = {
-        "model": model,
-        "system": body.system or "",
-        "messages": [{"role": m.role, "content": m.content} for m in body.messages],
-        "max_tokens": body.max_tokens,
-        "temperature": body.temperature,
-    }
-
-    do_cache = body.temperature is None or body.temperature <= 0.3
-    key = cache_key(payload) if do_cache else None
-
-    if key:
-        cached = cache_get(key)
-        if cached:
-            cached["cached"] = True
-            return cached
-
-    # Anthropic call
-    try:
-        resp = client.messages.create(**payload)
-    except Exception:
-        # Don't leak provider errors directly; inspect logs for details.
-        raise HTTPException(status_code=502, detail="Upstream model error")
-
-    text = "".join(
-        block.text for block in resp.content
-        if getattr(block, "type", None) == "text"
-    )
-
-    # Make usage JSON-serializable if the SDK returns a model object
-    usage_obj = getattr(resp, "usage", None)
-    try:
-        usage = usage_obj.model_dump() if hasattr(usage_obj, "model_dump") else usage_obj
-    except Exception:
-        usage = None
-
-    data = {
-        "cached": False,
-        "model": model,
-        "text": text,
-        "usage": usage,
-    }
-
-    if key:
-        cache_set(key, data, CACHE_TTL_SECONDS)
-
-    return data
-```
+    if rds
