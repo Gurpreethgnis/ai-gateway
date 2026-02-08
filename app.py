@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from anthropic import Anthropic
 
-# Optional Redis cache (recommended for multi-device cost savings)
+# Optional Redis cache
 try:
     import redis
 except Exception:
@@ -17,43 +17,41 @@ except Exception:
 
 app = FastAPI()
 
-# =========
-# SECURITY: Require X-API-Key on every request
-# =========
+# =====================================================
+# ORIGIN SECURITY: Require X-API-Key on ALL requests
+# =====================================================
 
-# Fail fast if the server isn't configured correctly
-GW_KEY = os.getenv("GW_KEY")
-if not GW_KEY:
-    raise RuntimeError("GW_KEY is not set (required). Set it in your Railway/host env vars.")
+GATEWAY_API_KEY = os.getenv("GATEWAY_API_KEY")
+if not GATEWAY_API_KEY:
+    raise RuntimeError(
+        "GATEWAY_API_KEY is not set. "
+        "Set it in Railway environment variables."
+    )
 
 @app.middleware("http")
 async def require_api_key_middleware(request: Request, call_next):
-    # If you ever want an unauthenticated probe endpoint, you can allowlist it here.
-    # Example:
-    # if request.url.path in ["/live"]:
-    #     return await call_next(request)
+    api_key = request.headers.get("x-api-key")
 
-    api_key = request.headers.get("x-api-key")  # header names are case-insensitive
     if not api_key:
         raise HTTPException(status_code=401, detail="X-API-Key required")
 
-    if api_key != GW_KEY:
+    if api_key != GATEWAY_API_KEY:
         raise HTTPException(status_code=403, detail="Invalid API key")
 
     return await call_next(request)
 
-# =========
+# =====================================================
 # APP CONFIG
-# =========
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
-REDIS_URL = os.environ.get("REDIS_URL")  # optional
-CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", "1800"))  # 30 min default
+# =====================================================
 
-DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "claude-sonnet-4-0")
-OPUS_MODEL = os.environ.get("OPUS_MODEL", "claude-opus-4-5")
-DEFAULT_MAX_TOKENS = int(os.environ.get("DEFAULT_MAX_TOKENS", "1200"))
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+REDIS_URL = os.getenv("REDIS_URL")
 
-MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", "250000"))  # ~250KB guardrail
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "1800"))
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "claude-sonnet-4-0")
+OPUS_MODEL = os.getenv("OPUS_MODEL", "claude-opus-4-5")
+DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", "1200"))
+MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", "250000"))
 
 client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
@@ -65,9 +63,10 @@ if REDIS_URL and redis is not None:
     except Exception:
         rds = None
 
-# =========
+# =====================================================
 # MODELS
-# =========
+# =====================================================
+
 class ChatMessage(BaseModel):
     role: str = Field(..., pattern="^(user|assistant)$")
     content: str
@@ -76,52 +75,54 @@ class ChatReq(BaseModel):
     system: Optional[str] = ""
     messages: List[ChatMessage]
     max_tokens: int = DEFAULT_MAX_TOKENS
-    model: Optional[str] = None  # optional override: "claude-opus-4-5" etc.
+    model: Optional[str] = None
     temperature: Optional[float] = 0.2
 
-# =========
+# =====================================================
 # HELPERS
-# =========
+# =====================================================
+
 def is_hard_task(text: str) -> bool:
     t = text.lower()
-    signals = [
-        "architecture", "design doc", "production", "incident", "root cause",
-        "migration", "refactor", "security", "performance", "optimize",
-        "kubernetes", "terraform", "rollout", "zero downtime", "deploy",
-        "database migration", "oncall", "postmortem",
-    ]
-    return any(s in t for s in signals)
+    return any(
+        k in t for k in [
+            "architecture", "design doc", "production", "incident",
+            "migration", "refactor", "security", "performance",
+            "kubernetes", "terraform", "postmortem",
+        ]
+    )
 
 def route_model(req: ChatReq) -> str:
     if req.model:
         return req.model
 
-    joined = "\n".join([m.content for m in req.messages if m.role == "user"])[:8000]
+    joined = "\n".join(
+        m.content for m in req.messages if m.role == "user"
+    )[:8000]
+
     return OPUS_MODEL if is_hard_task(joined) else DEFAULT_MODEL
 
 def cache_key(payload: Dict[str, Any]) -> str:
-    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    raw = json.dumps(payload, sort_keys=True).encode()
     return hashlib.sha256(raw).hexdigest()
 
-def cache_get(key: str) -> Optional[Dict[str, Any]]:
+def cache_get(key: str):
     if not rds:
         return None
-    v = rds.get(key)
-    if not v:
-        return None
     try:
-        return json.loads(v)
+        v = rds.get(key)
+        return json.loads(v) if v else None
     except Exception:
         return None
 
 def cache_set(key: str, data: Dict[str, Any], ttl: int):
-    if not rds:
-        return
-    rds.setex(key, ttl, json.dumps(data, ensure_ascii=False))
+    if rds:
+        rds.setex(key, ttl, json.dumps(data))
 
-# =========
+# =====================================================
 # ROUTES
-# =========
+# =====================================================
+
 @app.get("/health")
 def health():
     return {
@@ -133,26 +134,30 @@ def health():
 
 @app.post("/chat")
 async def chat(req: Request, body: ChatReq):
-    # Guard: body size
     raw = await req.body()
     if len(raw) > MAX_BODY_BYTES:
-        raise HTTPException(status_code=413, detail=f"Payload too large (> {MAX_BODY_BYTES} bytes)")
+        raise HTTPException(status_code=413, detail="Payload too large")
 
     if not client:
-        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set on server")
+        raise HTTPException(
+            status_code=500,
+            detail="ANTHROPIC_API_KEY not set"
+        )
 
     model = route_model(body)
 
     payload = {
         "model": model,
         "system": body.system or "",
-        "messages": [{"role": m.role, "content": m.content} for m in body.messages],
+        "messages": [
+            {"role": m.role, "content": m.content}
+            for m in body.messages
+        ],
         "max_tokens": body.max_tokens,
         "temperature": body.temperature,
     }
 
-    # Cache only when request is deterministic-ish (temperature low)
-    do_cache = (body.temperature is None) or (body.temperature <= 0.3)
+    do_cache = body.temperature is None or body.temperature <= 0.3
     key = cache_key(payload) if do_cache else None
 
     if key:
@@ -163,15 +168,15 @@ async def chat(req: Request, body: ChatReq):
 
     resp = client.messages.create(**payload)
 
-    out = ""
-    for block in resp.content:
-        if getattr(block, "type", None) == "text":
-            out += block.text
+    text = "".join(
+        block.text for block in resp.content
+        if getattr(block, "type", None) == "text"
+    )
 
     data = {
         "cached": False,
         "model": model,
-        "text": out,
+        "text": text,
         "usage": getattr(resp, "usage", None),
     }
 
