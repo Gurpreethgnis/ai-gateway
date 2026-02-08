@@ -177,7 +177,11 @@ def health():
 @app.get("/debug/origin")
 async def debug_origin(req: Request):
     v = req.headers.get("x-origin-secret")
-    return {"has_x_origin_secret": bool(v), "len": len(v or "")}
+    return {
+        "has_x_origin_secret": bool(v),
+        "x_origin_secret_len": len(v or ""),
+    }
+
 
 @app.get("/debug/headers")
 async def debug_headers(req: Request):
