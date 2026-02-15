@@ -2,6 +2,9 @@ import os
 import json
 import hashlib
 import traceback
+import asyncio
+import time
+import logging
 from typing import Any, Optional, List, Dict
 
 from fastapi import FastAPI, HTTPException, Request
@@ -15,6 +18,14 @@ try:
     import redis
 except Exception:
     redis = None
+
+# =====================================================
+# LOGGING
+# =====================================================
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
+log = logging.getLogger("gateway")
 
 app = FastAPI()
 
@@ -46,6 +57,9 @@ OPUS_MODEL = os.getenv("OPUS_MODEL", "claude-opus-4-5")
 DEFAULT_MAX_TOKENS = int(os.getenv("DEFAULT_MAX_TOKENS", "1200"))
 MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", "250000"))
 
+# Hard timeout for upstream model call (prevents hangs -> CF 502)
+UPSTREAM_TIMEOUT_SECONDS = float(os.getenv("UPSTREAM_TIMEOUT_SECONDS", "30"))
+
 client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
 rds = None
@@ -53,7 +67,8 @@ if REDIS_URL and redis is not None:
     try:
         rds = redis.Redis.from_url(REDIS_URL, decode_responses=True)
         rds.ping()
-    except Exception:
+    except Exception as e:
+        log.warning("Redis disabled: %r", e)
         rds = None
 
 # =====================================================
@@ -65,10 +80,11 @@ async def http_exception_handler(_: Request, exc: HTTPException):
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 @app.exception_handler(Exception)
-async def unhandled_exception_handler(_: Request, exc: Exception):
+async def unhandled_exception_handler(request: Request, exc: Exception):
     # Log full stack trace to Railway logs
-    print("UNHANDLED EXCEPTION:", repr(exc))
-    print(traceback.format_exc())
+    ray = request.headers.get("cf-ray") or ""
+    log.error("UNHANDLED EXCEPTION (cf-ray=%s): %r", ray, exc)
+    log.error(traceback.format_exc())
     return JSONResponse(status_code=500, content={"detail": "Internal error"})
 
 # =====================================================
@@ -95,7 +111,6 @@ async def security_middleware(request: Request, call_next):
 
     except HTTPException as exc:
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-
 
 # =====================================================
 # MODELS
@@ -153,6 +168,22 @@ def cache_set(key: str, data: Dict[str, Any], ttl: int):
     except Exception:
         pass
 
+async def call_anthropic_with_timeout(payload: Dict[str, Any]):
+    """
+    Anthropic SDK call is synchronous. Run it in a thread + enforce timeout.
+    This prevents hanging requests that can surface as Cloudflare 502.
+    """
+    if client is None:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set")
+
+    async def _run():
+        return await asyncio.to_thread(lambda: client.messages.create(**payload))
+
+    try:
+        return await asyncio.wait_for(_run(), timeout=UPSTREAM_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Upstream model timed out")
+
 # =====================================================
 # ROUTES
 # =====================================================
@@ -166,6 +197,7 @@ def health():
         "opus_model": OPUS_MODEL,
         "origin_lockdown": bool(ORIGIN_SECRET),
         "require_cf_access_headers": REQUIRE_CF_ACCESS_HEADERS,
+        "upstream_timeout_seconds": UPSTREAM_TIMEOUT_SECONDS,
     }
 
 @app.get("/debug/origin")
@@ -176,24 +208,24 @@ async def debug_origin(req: Request):
         "x_origin_secret_len": len(v or ""),
     }
 
-
 @app.get("/debug/headers")
 async def debug_headers(req: Request):
     return {
         "has_x_origin_secret": bool(req.headers.get("x-origin-secret")),
         "x_origin_secret_len": len(req.headers.get("x-origin-secret") or ""),
         "has_api_key": bool(req.headers.get("x-api-key")),
+        "has_cf_ray": bool(req.headers.get("cf-ray")),
     }
-
 
 @app.post("/chat")
 async def chat(req: Request, body: ChatReq):
+    # Size guard (fast fail)
     raw = await req.body()
     if len(raw) > MAX_BODY_BYTES:
         raise HTTPException(status_code=413, detail="Payload too large")
 
-    if not client:
-        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set")
+    ray = req.headers.get("cf-ray") or ""
+    t0 = time.time()
 
     model = route_model(body)
 
@@ -215,14 +247,26 @@ async def chat(req: Request, body: ChatReq):
             return cached
 
     try:
-        resp = client.messages.create(**payload)
-    except Exception:
+        resp = await call_anthropic_with_timeout(payload)
+    except HTTPException:
+        # already clean (504 timeout, 500 missing key, etc.)
+        raise
+    except Exception as e:
+        # THIS IS THE IMPORTANT PART: log the real upstream error
+        log.error("CHAT UPSTREAM ERROR (cf-ray=%s): %r", ray, e)
+        log.error(traceback.format_exc())
         raise HTTPException(status_code=502, detail="Upstream model error")
 
-    text = "".join(
-        block.text for block in resp.content
-        if getattr(block, "type", None) == "text"
-    )
+    # Parse response text
+    try:
+        text = "".join(
+            block.text for block in resp.content
+            if getattr(block, "type", None) == "text"
+        )
+    except Exception as e:
+        log.error("CHAT PARSE ERROR (cf-ray=%s): %r", ray, e)
+        log.error(traceback.format_exc())
+        raise HTTPException(status_code=502, detail="Upstream response parse error")
 
     usage_obj = getattr(resp, "usage", None)
     try:
@@ -234,5 +278,8 @@ async def chat(req: Request, body: ChatReq):
 
     if key:
         cache_set(key, data, CACHE_TTL_SECONDS)
+
+    dt_ms = int((time.time() - t0) * 1000)
+    log.info("CHAT OK (cf-ray=%s) model=%s ms=%s cached=%s", ray, model, dt_ms, False)
 
     return data
