@@ -142,10 +142,24 @@ def is_hard_task(text: str) -> bool:
     )
 
 def route_model(req: ChatReq) -> str:
+    """
+    Accept friendly aliases from clients and map to real Anthropic model IDs.
+    """
     if req.model:
+        m = req.model.strip().lower()
+
+        # friendly aliases
+        if m in ("sonnet", "sonnet-4", "sonnet4"):
+            return DEFAULT_MODEL
+        if m in ("opus", "opus-4", "opus4"):
+            return OPUS_MODEL
+
+        # if they pass a real Anthropic model id, allow it through
         return req.model
+
     joined = "\n".join(m.content for m in req.messages if m.role == "user")[:8000]
     return OPUS_MODEL if is_hard_task(joined) else DEFAULT_MODEL
+
 
 def cache_key(payload: Dict[str, Any]) -> str:
     raw = json.dumps(payload, sort_keys=True).encode()
