@@ -60,6 +60,9 @@ MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", "250000"))
 # Hard timeout for upstream model call (prevents hangs -> CF 502)
 UPSTREAM_TIMEOUT_SECONDS = float(os.getenv("UPSTREAM_TIMEOUT_SECONDS", "30"))
 
+# Model proof prefix (what you want to see inside Cursor)
+MODEL_PREFIX = os.getenv("MODEL_PREFIX", "MYMODEL:")
+
 client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
 rds = None
@@ -245,11 +248,40 @@ def is_hard_task(text: str) -> bool:
         ]
     )
 
+def strip_model_prefix(m: Optional[str]) -> Optional[str]:
+    """
+    Cursor may send back whatever it sees in /v1/models.
+    If you prefix model IDs (MYMODEL:...), strip it before routing.
+    """
+    if not m:
+        return None
+    s = m.strip()
+    low = s.lower()
+
+    # Accept both "MYMODEL:xxx" and "MYMODEL-xxx" style
+    if low.startswith("mymodel:"):
+        return s[len("MYMODEL:"):].strip()
+    if low.startswith("mymodel-"):
+        return s[len("MYMODEL-"):].strip()
+    return s
+
+def with_model_prefix(m: str) -> str:
+    """
+    Add your proof prefix, but never double-prefix.
+    """
+    base = strip_model_prefix(m) or ""
+    return f"{MODEL_PREFIX}{base}"
+
 def map_model_alias(maybe: Optional[str]) -> Optional[str]:
     """
     Map friendly aliases (Cursor/OpenAI model strings) into Anthropic model IDs.
     If unknown, return None (let routing decide).
     """
+    if not maybe:
+        return None
+
+    # NEW: strip your proof prefix if Cursor sends it back
+    maybe = strip_model_prefix(maybe)
     if not maybe:
         return None
 
@@ -364,6 +396,7 @@ def health():
         "origin_lockdown": bool(ORIGIN_SECRET),
         "require_cf_access_headers": REQUIRE_CF_ACCESS_HEADERS,
         "upstream_timeout_seconds": UPSTREAM_TIMEOUT_SECONDS,
+        "model_prefix": MODEL_PREFIX,
     }
 
 @app.get("/debug/origin")
@@ -507,7 +540,7 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
                 "id": f"chatcmpl_cached_{key[:12]}",
                 "object": "chat.completion",
                 "created": int(time.time()),
-                "model": f"MYMODEL:{cached.get('model', model)}",
+                "model": with_model_prefix(str(cached.get("model", model))),
                 "choices": [
                     {
                         "index": 0,
@@ -554,7 +587,7 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
         "id": f"chatcmpl_{hashlib.sha1((ray + str(time.time())).encode()).hexdigest()[:16]}",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": f"MYMODEL:{model}",
+        "model": with_model_prefix(model),
         "choices": [
             {
                 "index": 0,
@@ -583,12 +616,25 @@ async def openai_models(req: Request):
     ray = req.headers.get("cf-ray") or ""
     ua = req.headers.get("user-agent") or ""
     log.info("MODELS HIT cf-ray=%s ua=%s", ray, ua[:120])
-    return {
+
+    payload = {
         "object": "list",
         "data": [
+            # Prefixed (what you want to visually prove in Cursor)
+            {"id": with_model_prefix("sonnet"), "object": "model"},
+            {"id": with_model_prefix("opus"), "object": "model"},
+            {"id": with_model_prefix(DEFAULT_MODEL), "object": "model"},
+            {"id": with_model_prefix(OPUS_MODEL), "object": "model"},
+
+            # Optional: also include unprefixed models (safer for scripts / other clients)
             {"id": "sonnet", "object": "model"},
             {"id": "opus", "object": "model"},
             {"id": DEFAULT_MODEL, "object": "model"},
             {"id": OPUS_MODEL, "object": "model"},
         ],
     }
+
+    resp = JSONResponse(content=payload)
+    resp.headers["X-Gateway"] = "gursimanoor-gateway"
+    resp.headers["X-Model-Source"] = "custom"
+    return resp
