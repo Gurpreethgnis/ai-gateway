@@ -6,7 +6,7 @@ import asyncio
 import time
 import logging
 from typing import Any, Optional, List, Dict, Literal, Union
-
+from fastapi.exceptions import RequestValidationError
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -28,6 +28,20 @@ logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
 log = logging.getLogger("gateway")
 
 app = FastAPI()
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    ray = request.headers.get("cf-ray") or ""
+    ua = request.headers.get("user-agent") or ""
+    log.error(
+        "VALIDATION ERROR %s %s -> 422 cf-ray=%s ua=%s errors=%s",
+        request.method,
+        request.url.path,
+        ray,
+        ua[:120],
+        exc.errors(),
+    )
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 # =====================================================
 # SECURITY CONFIG
@@ -99,6 +113,14 @@ def root():
 # =====================================================
 # REQUEST LOGGING
 # =====================================================
+@app.middleware("http")
+async def log_404_middleware(request: Request, call_next):
+    resp = await call_next(request)
+    if resp.status_code == 404:
+        ray = request.headers.get("cf-ray") or ""
+        ua = request.headers.get("user-agent") or ""
+        log.warning("404 %s %s cf-ray=%s ua=%s", request.method, request.url.path, ray, ua[:120])
+    return resp
 
 @app.middleware("http")
 async def request_log_middleware(request: Request, call_next):
