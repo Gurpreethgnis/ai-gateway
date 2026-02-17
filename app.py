@@ -5,7 +5,7 @@ import traceback
 import asyncio
 import time
 import logging
-from typing import Any, Optional, List, Dict, Literal
+from typing import Any, Optional, List, Dict, Literal, Union
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -41,7 +41,7 @@ if not GATEWAY_API_KEY:
 #   X-Origin-Secret: <secret>
 ORIGIN_SECRET = os.getenv("ORIGIN_SECRET")  # set in Railway (recommended)
 
-# Optional (usually unnecessary) extra enforcement at app layer
+# Optional extra enforcement at app layer
 REQUIRE_CF_ACCESS_HEADERS = os.getenv("REQUIRE_CF_ACCESS_HEADERS", "0") == "1"
 
 # =====================================================
@@ -95,7 +95,7 @@ def extract_gateway_api_key(request: Request) -> Optional[str]:
     Accept either:
       - X-API-Key: <key>
       - Authorization: Bearer <key>
-    (Cursor typically uses Authorization: Bearer ...)
+    (Cursor often uses Authorization: Bearer ...)
     """
     x = request.headers.get("x-api-key")
     if x:
@@ -120,7 +120,7 @@ async def security_middleware(request: Request, call_next):
             if got != ORIGIN_SECRET:
                 raise HTTPException(status_code=403, detail="Forbidden")
 
-        # 2) Optional CF Access header enforcement (normally handled by CF Access itself)
+        # 2) Optional CF Access header enforcement (usually handled by CF Access itself)
         if REQUIRE_CF_ACCESS_HEADERS:
             if not request.headers.get("cf-access-client-id") or not request.headers.get("cf-access-client-secret"):
                 raise HTTPException(status_code=403, detail="Missing Cloudflare Access headers")
@@ -158,9 +158,15 @@ class ChatReq(BaseModel):
 
 OpenAIRole = Literal["system", "user", "assistant", "tool", "developer"]
 
+# Cursor sometimes sends content as a string, sometimes as structured parts.
+OAContent = Union[str, List[Any], Dict[str, Any], None]
+
 class OAChatMessage(BaseModel):
     role: OpenAIRole
-    content: Optional[str] = None
+    content: OAContent = None
+
+    class Config:
+        extra = "allow"
 
 class OAChatReq(BaseModel):
     model: Optional[str] = None
@@ -169,12 +175,15 @@ class OAChatReq(BaseModel):
     temperature: Optional[float] = 0.2
     stream: Optional[bool] = False
 
+    class Config:
+        extra = "allow"
+
 # =====================================================
 # HELPERS
 # =====================================================
 
 def is_hard_task(text: str) -> bool:
-    t = (text or "").lower()
+    t = text.lower()
     return any(
         k in t for k in [
             "architecture", "design doc", "production", "incident",
@@ -186,24 +195,24 @@ def is_hard_task(text: str) -> bool:
 def map_model_alias(maybe: Optional[str]) -> Optional[str]:
     """
     Map friendly aliases (Cursor/OpenAI model strings) into Anthropic model IDs.
-    If unknown, return None so routing decides.
+    If unknown, return None (let routing decide).
     """
     if not maybe:
         return None
 
     m = maybe.strip().lower()
 
-    # Friendly aliases
+    # friendly aliases you expose via /v1/models
     if m in ("sonnet", "sonnet-4", "sonnet4", "claude-sonnet", "claude-sonnet-4"):
         return DEFAULT_MODEL
     if m in ("opus", "opus-4", "opus4", "claude-opus", "claude-opus-4"):
         return OPUS_MODEL
 
-    # If they already passed a real Anthropic model id, allow it
+    # already an Anthropic model id
     if m.startswith("claude-"):
         return maybe
 
-    # Unknown "gpt-4o" etc: ignore and let routing choose
+    # unknown (e.g., gpt-4o) -> ignore, let heuristic route
     return None
 
 def route_model_from_messages(user_text: str, explicit_model: Optional[str]) -> str:
@@ -211,6 +220,17 @@ def route_model_from_messages(user_text: str, explicit_model: Optional[str]) -> 
     if mapped:
         return mapped
     return OPUS_MODEL if is_hard_task(user_text[:8000]) else DEFAULT_MODEL
+
+def normalize_openai_content_to_text(content: OAContent) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    # If Cursor sends content parts (list/dict), stringify safely.
+    try:
+        return json.dumps(content, ensure_ascii=False)
+    except Exception:
+        return str(content)
 
 def cache_key(payload: Dict[str, Any]) -> str:
     raw = json.dumps(payload, sort_keys=True).encode()
@@ -264,9 +284,6 @@ def extract_usage(resp) -> Optional[Dict[str, Any]]:
         return None
 
 def anthropic_to_openai_usage(usage: Optional[Dict[str, Any]]) -> Optional[Dict[str, int]]:
-    """
-    Cursor/OpenAI-style usage: prompt_tokens, completion_tokens, total_tokens
-    """
     if not usage:
         return None
     try:
@@ -299,10 +316,7 @@ def health():
 @app.get("/debug/origin")
 async def debug_origin(req: Request):
     v = req.headers.get("x-origin-secret")
-    return {
-        "has_x_origin_secret": bool(v),
-        "x_origin_secret_len": len(v or ""),
-    }
+    return {"has_x_origin_secret": bool(v), "x_origin_secret_len": len(v or "")}
 
 @app.get("/debug/headers")
 async def debug_headers(req: Request):
@@ -385,8 +399,8 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
     if len(raw) > MAX_BODY_BYTES:
         raise HTTPException(status_code=413, detail="Payload too large")
 
+    # Cursor can work without streaming; add later if you want
     if body.stream:
-        # implement later if you want; Cursor can work without streaming
         raise HTTPException(status_code=400, detail="stream=true not supported yet")
 
     ray = req.headers.get("cf-ray") or ""
@@ -399,25 +413,21 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
 
     for m in body.messages:
         role = (m.role or "").lower()
-        content = m.content or ""
+        content_text = normalize_openai_content_to_text(m.content)
+
         if role in ("system", "developer"):
-            if content.strip():
-                system_parts.append(content.strip())
+            if content_text.strip():
+                system_parts.append(content_text.strip())
         elif role in ("user", "assistant"):
-            aa_messages.append({"role": role, "content": content})
-            if role == "user" and content:
-                user_join.append(content)
+            aa_messages.append({"role": role, "content": content_text})
+            if role == "user" and content_text:
+                user_join.append(content_text)
         else:
             # ignore tool/other roles for now
             continue
 
-    # Anthropic messages should start with user; Cursor can sometimes start with assistant
-    if aa_messages and aa_messages[0]["role"] != "user":
-        aa_messages.insert(0, {"role": "user", "content": " "})
-
     system_text = "\n\n".join(system_parts).strip()
 
-    # Determine model
     joined_user = "\n".join(user_join)
     model = route_model_from_messages(joined_user, body.model)
 
@@ -435,6 +445,7 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
     do_cache = temperature <= 0.3
     key = cache_key(payload) if do_cache else None
 
+    # Cache hit
     if key:
         cached = cache_get(key)
         if cached and isinstance(cached, dict) and "text" in cached:
@@ -443,7 +454,7 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
                 "id": f"chatcmpl_cached_{key[:12]}",
                 "object": "chat.completion",
                 "created": int(time.time()),
-                "model": cached.get("model", model),
+                "model": f"MYMODEL:{cached.get('model', model)}",
                 "choices": [
                     {
                         "index": 0,
@@ -453,10 +464,17 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
                 ],
                 "usage": anthropic_to_openai_usage(cached.get("usage")),
             }
+
+            response = JSONResponse(content=resp_json)
+            response.headers["X-Gateway"] = "gursimanoor-gateway"
+            response.headers["X-Model-Source"] = "custom"
+            response.headers["X-Cache"] = "HIT"
+
             dt_ms = int((time.time() - t0) * 1000)
             log.info("OA OK CACHED (cf-ray=%s) model=%s ms=%s", ray, model, dt_ms)
-            return resp_json
+            return response
 
+    # Upstream call
     try:
         resp = await call_anthropic_with_timeout(payload)
     except HTTPException:
@@ -483,7 +501,7 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
         "id": f"chatcmpl_{hashlib.sha1((ray + str(time.time())).encode()).hexdigest()[:16]}",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": model,
+        "model": f"MYMODEL:{model}",  # <-- your proof inside the response payload
         "choices": [
             {
                 "index": 0,
@@ -494,16 +512,22 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
         "usage": anthropic_to_openai_usage(usage),
     }
 
+    response = JSONResponse(content=resp_json)
+    response.headers["X-Gateway"] = "gursimanoor-gateway"
+    response.headers["X-Model-Source"] = "custom"
+    response.headers["X-Cache"] = "MISS"
+
     dt_ms = int((time.time() - t0) * 1000)
     log.info("OA OK (cf-ray=%s) model=%s ms=%s", ray, model, dt_ms)
 
-    return resp_json
+    return response
 
-# -------------------------------------------
-# OpenAI-compatible models endpoint (Cursor often calls this)
-# -------------------------------------------
+# -------------------------
+# OpenAI-compatible models
+# -------------------------
 @app.get("/v1/models")
 async def openai_models():
+    # Keep it simple: return the aliases you want Cursor to show + the real ids.
     return {
         "object": "list",
         "data": [
