@@ -86,6 +86,18 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     log.error(traceback.format_exc())
     return JSONResponse(status_code=500, content={"detail": "Internal error"})
 
+@app.middleware("http")
+async def request_log_middleware(request: Request, call_next):
+    t0 = time.time()
+    resp = await call_next(request)
+    dt_ms = int((time.time() - t0) * 1000)
+    ray = request.headers.get("cf-ray") or ""
+    ua = request.headers.get("user-agent") or ""
+    log.info("REQ %s %s -> %s (%sms) cf-ray=%s ua=%s",
+             request.method, request.url.path, resp.status_code, dt_ms, ray, ua[:120])
+    return resp
+
+
 # =====================================================
 # AUTH HELPERS
 # =====================================================
@@ -526,8 +538,10 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
 # OpenAI-compatible models
 # -------------------------
 @app.get("/v1/models")
-async def openai_models():
-    # Keep it simple: return the aliases you want Cursor to show + the real ids.
+async def openai_models(req: Request):
+    ray = req.headers.get("cf-ray") or ""
+    ua = req.headers.get("user-agent") or ""
+    log.info("MODELS HIT cf-ray=%s ua=%s", ray, ua[:120])
     return {
         "object": "list",
         "data": [
@@ -537,3 +551,4 @@ async def openai_models():
             {"id": OPUS_MODEL, "object": "model"},
         ],
     }
+
