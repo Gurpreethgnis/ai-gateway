@@ -487,8 +487,10 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
         raise HTTPException(status_code=413, detail="Payload too large")
 
     # Cursor can work without streaming; add later if you want
+    # Cursor often sends stream=true. We don't SSE-stream yet, so just ignore and return normal JSON.
     if body.stream:
-        raise HTTPException(status_code=400, detail="stream=true not supported yet")
+        log.info("OA stream=true requested; ignoring and returning non-stream response")
+
 
     ray = req.headers.get("cf-ray") or ""
     t0 = time.time()
