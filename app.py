@@ -608,6 +608,13 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
 
     return response
 
+
+# === COMPATIBILITY ALIAS (some clients use non-versioned path) ===
+@app.post("/chat/completions")
+async def chat_completions_alias(req: Request, body: OAChatReq):
+    return await openai_chat_completions(req, body)
+
+
 # -------------------------
 # OpenAI-compatible models
 # -------------------------
@@ -620,13 +627,10 @@ async def openai_models(req: Request):
     payload = {
         "object": "list",
         "data": [
-            # Prefixed (what you want to visually prove in Cursor)
             {"id": with_model_prefix("sonnet"), "object": "model"},
             {"id": with_model_prefix("opus"), "object": "model"},
             {"id": with_model_prefix(DEFAULT_MODEL), "object": "model"},
             {"id": with_model_prefix(OPUS_MODEL), "object": "model"},
-
-            # Optional: also include unprefixed models (safer for scripts / other clients)
             {"id": "sonnet", "object": "model"},
             {"id": "opus", "object": "model"},
             {"id": DEFAULT_MODEL, "object": "model"},
@@ -638,3 +642,9 @@ async def openai_models(req: Request):
     resp.headers["X-Gateway"] = "gursimanoor-gateway"
     resp.headers["X-Model-Source"] = "custom"
     return resp
+
+
+# === COMPATIBILITY ALIAS (some clients use non-versioned path) ===
+@app.get("/models")
+async def models_alias(req: Request):
+    return await openai_models(req)
