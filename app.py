@@ -5,7 +5,7 @@ import traceback
 import asyncio
 import time
 import logging
-from typing import Any, Optional, List, Dict
+from typing import Any, Optional, List, Dict, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -81,11 +81,31 @@ async def http_exception_handler(_: Request, exc: HTTPException):
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    # Log full stack trace to Railway logs
     ray = request.headers.get("cf-ray") or ""
     log.error("UNHANDLED EXCEPTION (cf-ray=%s): %r", ray, exc)
     log.error(traceback.format_exc())
     return JSONResponse(status_code=500, content={"detail": "Internal error"})
+
+# =====================================================
+# AUTH HELPERS
+# =====================================================
+
+def extract_gateway_api_key(request: Request) -> Optional[str]:
+    """
+    Accept either:
+      - X-API-Key: <key>
+      - Authorization: Bearer <key>
+    (Cursor typically uses Authorization: Bearer ...)
+    """
+    x = request.headers.get("x-api-key")
+    if x:
+        return x
+
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1].strip() or None
+
+    return None
 
 # =====================================================
 # MIDDLEWARE: AUTH ON ALL REQUESTS
@@ -100,10 +120,15 @@ async def security_middleware(request: Request, call_next):
             if got != ORIGIN_SECRET:
                 raise HTTPException(status_code=403, detail="Forbidden")
 
-        # 2) API key (client auth)
-        api_key = request.headers.get("x-api-key")
+        # 2) Optional CF Access header enforcement (normally handled by CF Access itself)
+        if REQUIRE_CF_ACCESS_HEADERS:
+            if not request.headers.get("cf-access-client-id") or not request.headers.get("cf-access-client-secret"):
+                raise HTTPException(status_code=403, detail="Missing Cloudflare Access headers")
+
+        # 3) API key (client auth)
+        api_key = extract_gateway_api_key(request)
         if not api_key:
-            raise HTTPException(status_code=401, detail="X-API-Key required")
+            raise HTTPException(status_code=401, detail="API key required (X-API-Key or Authorization: Bearer)")
         if api_key != GATEWAY_API_KEY:
             raise HTTPException(status_code=403, detail="Invalid API key")
 
@@ -113,7 +138,7 @@ async def security_middleware(request: Request, call_next):
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 # =====================================================
-# MODELS
+# MODELS (YOUR /chat)
 # =====================================================
 
 class ChatMessage(BaseModel):
@@ -126,6 +151,24 @@ class ChatReq(BaseModel):
     max_tokens: int = DEFAULT_MAX_TOKENS
     model: Optional[str] = None
     temperature: Optional[float] = 0.2
+
+# =====================================================
+# MODELS (OPENAI COMPAT FOR CURSOR)
+# =====================================================
+
+OpenAIRole = Literal["system", "user", "assistant", "tool", "developer"]
+
+class OAChatMessage(BaseModel):
+    role: OpenAIRole
+    content: Optional[str] = None
+    # ignore tool calls/etc for now (Cursor basic usage doesn’t require them)
+
+class OAChatReq(BaseModel):
+    model: Optional[str] = None
+    messages: List[OAChatMessage]
+    max_tokens: Optional[int] = None
+    temperature: Optional[float] = 0.2
+    stream: Optional[bool] = False
 
 # =====================================================
 # HELPERS
@@ -141,25 +184,38 @@ def is_hard_task(text: str) -> bool:
         ]
     )
 
-def route_model(req: ChatReq) -> str:
+def map_model_alias(maybe: Optional[str]) -> Optional[str]:
     """
-    Accept friendly aliases from clients and map to real Anthropic model IDs.
+    Map friendly aliases (Cursor/OpenAI model strings) into Anthropic model IDs.
+    If unknown, just let routing decide (None) unless it's already an Anthropic ID.
     """
-    if req.model:
-        m = req.model.strip().lower()
+    if not maybe:
+        return None
 
-        # friendly aliases
-        if m in ("sonnet", "sonnet-4", "sonnet4"):
-            return DEFAULT_MODEL
-        if m in ("opus", "opus-4", "opus4"):
-            return OPUS_MODEL
+    m = maybe.strip().lower()
 
-        # if they pass a real Anthropic model id, allow it through
-        return req.model
+    # common friendly aliases
+    if m in ("sonnet", "sonnet-4", "sonnet4", "claude-sonnet", "claude-sonnet-4"):
+        return DEFAULT_MODEL
+    if m in ("opus", "opus-4", "opus4", "claude-opus", "claude-opus-4"):
+        return OPUS_MODEL
 
-    joined = "\n".join(m.content for m in req.messages if m.role == "user")[:8000]
-    return OPUS_MODEL if is_hard_task(joined) else DEFAULT_MODEL
+    # if they already passed a real Anthropic model id, allow it
+    if m.startswith("claude-"):
+        return maybe
 
+    # unknown "gpt-4o" etc: ignore and let routing choose
+    return None
+
+def route_model_from_messages(user_text: str, explicit_model: Optional[str]) -> str:
+    """
+    Decide Anthropic model. If explicit model maps, use it.
+    Otherwise route based on hard-task heuristic.
+    """
+    mapped = map_model_alias(explicit_model)
+    if mapped:
+        return mapped
+    return OPUS_MODEL if is_hard_task(user_text[:8000]) else DEFAULT_MODEL
 
 def cache_key(payload: Dict[str, Any]) -> str:
     raw = json.dumps(payload, sort_keys=True).encode()
@@ -185,7 +241,6 @@ def cache_set(key: str, data: Dict[str, Any], ttl: int):
 async def call_anthropic_with_timeout(payload: Dict[str, Any]):
     """
     Anthropic SDK call is synchronous. Run it in a thread + enforce timeout.
-    This prevents hanging requests that can surface as Cloudflare 502.
     """
     if client is None:
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set")
@@ -197,6 +252,39 @@ async def call_anthropic_with_timeout(payload: Dict[str, Any]):
         return await asyncio.wait_for(_run(), timeout=UPSTREAM_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Upstream model timed out")
+
+def extract_text_from_anthropic(resp) -> str:
+    return "".join(
+        block.text for block in getattr(resp, "content", [])
+        if getattr(block, "type", None) == "text"
+    )
+
+def extract_usage(resp) -> Optional[Dict[str, Any]]:
+    usage_obj = getattr(resp, "usage", None)
+    if usage_obj is None:
+        return None
+    try:
+        return usage_obj.model_dump() if hasattr(usage_obj, "model_dump") else usage_obj
+    except Exception:
+        return None
+
+def anthropic_to_openai_usage(usage: Optional[Dict[str, Any]]) -> Optional[Dict[str, int]]:
+    """
+    Cursor expects OpenAI-style usage sometimes.
+    Anthropic usage keys: input_tokens, output_tokens, ...
+    """
+    if not usage:
+        return None
+    try:
+        prompt = int(usage.get("input_tokens", 0) or 0)
+        completion = int(usage.get("output_tokens", 0) or 0)
+        return {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": prompt + completion,
+        }
+    except Exception:
+        return None
 
 # =====================================================
 # ROUTES
@@ -227,13 +315,16 @@ async def debug_headers(req: Request):
     return {
         "has_x_origin_secret": bool(req.headers.get("x-origin-secret")),
         "x_origin_secret_len": len(req.headers.get("x-origin-secret") or ""),
-        "has_api_key": bool(req.headers.get("x-api-key")),
+        "has_x_api_key": bool(req.headers.get("x-api-key")),
+        "has_authorization": bool(req.headers.get("authorization")),
         "has_cf_ray": bool(req.headers.get("cf-ray")),
     }
 
+# ---------------------
+# Your existing endpoint
+# ---------------------
 @app.post("/chat")
 async def chat(req: Request, body: ChatReq):
-    # Size guard (fast fail)
     raw = await req.body()
     if len(raw) > MAX_BODY_BYTES:
         raise HTTPException(status_code=413, detail="Payload too large")
@@ -241,7 +332,9 @@ async def chat(req: Request, body: ChatReq):
     ray = req.headers.get("cf-ray") or ""
     t0 = time.time()
 
-    model = route_model(body)
+    # model routing
+    joined_user = "\n".join(m.content for m in body.messages if m.role == "user")
+    model = route_model_from_messages(joined_user, body.model)
 
     payload = {
         "model": model,
@@ -263,31 +356,20 @@ async def chat(req: Request, body: ChatReq):
     try:
         resp = await call_anthropic_with_timeout(payload)
     except HTTPException:
-        # already clean (504 timeout, 500 missing key, etc.)
         raise
     except Exception as e:
-        # THIS IS THE IMPORTANT PART: log the real upstream error
         log.error("CHAT UPSTREAM ERROR (cf-ray=%s): %r", ray, e)
         log.error(traceback.format_exc())
         raise HTTPException(status_code=502, detail="Upstream model error")
 
-    # Parse response text
     try:
-        text = "".join(
-            block.text for block in resp.content
-            if getattr(block, "type", None) == "text"
-        )
+        text = extract_text_from_anthropic(resp)
     except Exception as e:
         log.error("CHAT PARSE ERROR (cf-ray=%s): %r", ray, e)
         log.error(traceback.format_exc())
         raise HTTPException(status_code=502, detail="Upstream response parse error")
 
-    usage_obj = getattr(resp, "usage", None)
-    try:
-        usage = usage_obj.model_dump() if hasattr(usage_obj, "model_dump") else usage_obj
-    except Exception:
-        usage = None
-
+    usage = extract_usage(resp)
     data = {"cached": False, "model": model, "text": text, "usage": usage}
 
     if key:
@@ -297,3 +379,125 @@ async def chat(req: Request, body: ChatReq):
     log.info("CHAT OK (cf-ray=%s) model=%s ms=%s cached=%s", ray, model, dt_ms, False)
 
     return data
+
+# -------------------------------------------
+# OpenAI-compatible endpoint for Cursor
+# -------------------------------------------
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(req: Request, body: OAChatReq):
+    raw = await req.body()
+    if len(raw) > MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="Payload too large")
+
+    if body.stream:
+        # implement later if you want; Cursor can work without streaming
+        raise HTTPException(status_code=400, detail="stream=true not supported yet")
+
+    ray = req.headers.get("cf-ray") or ""
+    t0 = time.time()
+
+    # Convert OpenAI messages -> Anthropic
+    system_parts: List[str] = []
+    aa_messages: List[Dict[str, str]] = []
+    user_join: List[str] = []
+
+    for m in body.messages:
+        role = (m.role or "").lower()
+        content = m.content or ""
+        if role in ("system", "developer"):
+            if content.strip():
+                system_parts.append(content.strip())
+        elif role in ("user", "assistant"):
+            aa_messages.append({"role": role, "content": content})
+            if role == "user" and content:
+                user_join.append(content)
+        else:
+            # ignore tool/other roles for now
+            continue
+
+    system_text = "\n\n".join(system_parts).strip()
+
+    # Determine model
+    joined_user = "\n".join(user_join)
+    model = route_model_from_messages(joined_user, body.model)
+
+    max_tokens = int(body.max_tokens or DEFAULT_MAX_TOKENS)
+    temperature = body.temperature if body.temperature is not None else 0.2
+
+    payload = {
+        "model": model,
+        "system": system_text,
+        "messages": aa_messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+
+    do_cache = temperature <= 0.3
+    key = cache_key(payload) if do_cache else None
+
+    if key:
+        cached = cache_get(key)
+        if cached and isinstance(cached, dict) and "text" in cached:
+            out_text = cached.get("text", "")
+            # OpenAI-style response
+            resp_json = {
+                "id": f"chatcmpl_cached_{key[:12]}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": cached.get("model", model),
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": out_text},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": anthropic_to_openai_usage(cached.get("usage")),
+            }
+            dt_ms = int((time.time() - t0) * 1000)
+            log.info("OA OK CACHED (cf-ray=%s) model=%s ms=%s", ray, model, dt_ms)
+            return resp_json
+
+    try:
+        resp = await call_anthropic_with_timeout(payload)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("OA UPSTREAM ERROR (cf-ray=%s): %r", ray, e)
+        log.error(traceback.format_exc())
+        raise HTTPException(status_code=502, detail="Upstream model error")
+
+    try:
+        out_text = extract_text_from_anthropic(resp)
+    except Exception as e:
+        log.error("OA PARSE ERROR (cf-ray=%s): %r", ray, e)
+        log.error(traceback.format_exc())
+        raise HTTPException(status_code=502, detail="Upstream response parse error")
+
+    usage = extract_usage(resp)
+
+    # store cache in your existing compact format
+    cache_blob = {"cached": False, "model": model, "text": out_text, "usage": usage}
+    if key:
+        cache_set(key, cache_blob, CACHE_TTL_SECONDS)
+
+    # OpenAI-style response
+    resp_json = {
+        "id": f"chatcmpl_{hashlib.sha1((ray + str(time.time())).encode()).hexdigest()[:16]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": out_text},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": anthropic_to_openai_usage(usage),
+    }
+
+    dt_ms = int((time.time() - t0) * 1000)
+    log.info("OA OK (cf-ray=%s) model=%s ms=%s", ray, model, dt_ms)
+
+    return resp_json
