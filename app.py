@@ -1,3 +1,4 @@
+# app.py
 import os
 import json
 import hashlib
@@ -6,8 +7,9 @@ import asyncio
 import time
 import logging
 from typing import Any, Optional, List, Dict, Literal, Union
-from fastapi.exceptions import RequestValidationError
+
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -28,6 +30,10 @@ logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
 log = logging.getLogger("gateway")
 
 app = FastAPI()
+
+# =====================================================
+# VALIDATION ERROR LOGGING
+# =====================================================
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -55,7 +61,7 @@ if not GATEWAY_API_KEY:
 #   X-Origin-Secret: <secret>
 ORIGIN_SECRET = os.getenv("ORIGIN_SECRET")  # set in Railway (recommended)
 
-# Optional extra enforcement at app layer
+# Optional extra enforcement at app layer (usually handled by CF Access itself)
 REQUIRE_CF_ACCESS_HEADERS = os.getenv("REQUIRE_CF_ACCESS_HEADERS", "0") == "1"
 
 # =====================================================
@@ -74,7 +80,7 @@ MAX_BODY_BYTES = int(os.getenv("MAX_BODY_BYTES", "250000"))
 # Hard timeout for upstream model call (prevents hangs -> CF 502)
 UPSTREAM_TIMEOUT_SECONDS = float(os.getenv("UPSTREAM_TIMEOUT_SECONDS", "30"))
 
-# Model proof prefix (what you want to see inside Cursor)
+# Model proof prefix (what you want to see inside clients)
 MODEL_PREFIX = os.getenv("MODEL_PREFIX", "MYMODEL:")
 
 client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
@@ -104,7 +110,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": "Internal error"})
 
 # -----------------------------------------------------
-# Root: helpful for sanity checks + keeps Cursor happy
+# Root: sanity checks
 # -----------------------------------------------------
 @app.get("/")
 def root():
@@ -113,6 +119,7 @@ def root():
 # =====================================================
 # REQUEST LOGGING
 # =====================================================
+
 @app.middleware("http")
 async def log_404_middleware(request: Request, call_next):
     resp = await call_next(request)
@@ -143,12 +150,13 @@ def extract_gateway_api_key(request: Request) -> Optional[str]:
     """
     Accept either:
       - X-API-Key: <key>
+      - api-key: <key>            (some OpenAI-compatible clients)
       - Authorization: Bearer <key>
-    (Cursor often uses Authorization: Bearer ...)
     """
-    x = request.headers.get("x-api-key")
-    if x:
-        return x
+    for hdr in ("x-api-key", "api-key"):
+        v = request.headers.get(hdr)
+        if v:
+            return v.strip() or None
 
     auth = request.headers.get("authorization") or ""
     if auth.lower().startswith("bearer "):
@@ -159,7 +167,6 @@ def extract_gateway_api_key(request: Request) -> Optional[str]:
 def is_public_path(path: str) -> bool:
     """
     Allow Cloudflare/cdn-cgi/browser-check assets and other non-API paths.
-    Cursor/Electron can trigger these.
     """
     if path in ("/", "/favicon.ico"):
         return True
@@ -173,7 +180,12 @@ def is_protected_api_path(path: str) -> bool:
     """
     Only enforce API auth on the actual endpoints you care about.
     """
-    return path.startswith("/v1/") or path in ("/chat", "/health", "/debug/origin", "/debug/headers")
+    return path.startswith("/v1/") or path in (
+        "/chat",
+        "/health",
+        "/debug/origin",
+        "/debug/headers",
+    )
 
 # =====================================================
 # MIDDLEWARE: SECURITY (ONLY FOR API PATHS)
@@ -196,18 +208,26 @@ async def security_middleware(request: Request, call_next):
         if ORIGIN_SECRET:
             got = request.headers.get("x-origin-secret")
             if got != ORIGIN_SECRET:
+                log.warning("BLOCK origin secret missing/mismatch path=%s host=%s", path, request.headers.get("host"))
                 raise HTTPException(status_code=403, detail="Forbidden")
 
         # 2) Optional CF Access header enforcement (usually handled by CF Access itself)
         if REQUIRE_CF_ACCESS_HEADERS:
             if not request.headers.get("cf-access-client-id") or not request.headers.get("cf-access-client-secret"):
+                log.warning("BLOCK missing CF Access headers path=%s host=%s", path, request.headers.get("host"))
                 raise HTTPException(status_code=403, detail="Missing Cloudflare Access headers")
 
         # 3) API key (client auth)
         api_key = extract_gateway_api_key(request)
         if not api_key:
-            raise HTTPException(status_code=401, detail="API key required (X-API-Key or Authorization: Bearer)")
+            present = ",".join(
+                [k for k in request.headers.keys() if k.lower() in ("authorization", "x-api-key", "api-key")]
+            )
+            log.warning("BLOCK missing api key path=%s host=%s present_headers=%s", path, request.headers.get("host"), present)
+            raise HTTPException(status_code=401, detail="API key required (X-API-Key/api-key/Authorization: Bearer)")
+
         if api_key != GATEWAY_API_KEY:
+            log.warning("BLOCK invalid api key path=%s host=%s", path, request.headers.get("host"))
             raise HTTPException(status_code=403, detail="Invalid API key")
 
         return await call_next(request)
@@ -231,12 +251,12 @@ class ChatReq(BaseModel):
     temperature: Optional[float] = 0.2
 
 # =====================================================
-# MODELS (OPENAI COMPAT FOR CURSOR)
+# MODELS (OPENAI COMPAT)
 # =====================================================
 
 OpenAIRole = Literal["system", "user", "assistant", "tool", "developer"]
 
-# Cursor sometimes sends content as a string, sometimes as structured parts.
+# Clients sometimes send content as a string, sometimes as structured parts.
 OAContent = Union[str, List[Any], Dict[str, Any], None]
 
 class OAChatMessage(BaseModel):
@@ -272,7 +292,7 @@ def is_hard_task(text: str) -> bool:
 
 def strip_model_prefix(m: Optional[str]) -> Optional[str]:
     """
-    Cursor may send back whatever it sees in /v1/models.
+    Some clients may send back whatever they see in /v1/models.
     If you prefix model IDs (MYMODEL:...), strip it before routing.
     """
     if not m:
@@ -280,7 +300,6 @@ def strip_model_prefix(m: Optional[str]) -> Optional[str]:
     s = m.strip()
     low = s.lower()
 
-    # Accept both "MYMODEL:xxx" and "MYMODEL-xxx" style
     if low.startswith("mymodel:"):
         return s[len("MYMODEL:"):].strip()
     if low.startswith("mymodel-"):
@@ -296,13 +315,12 @@ def with_model_prefix(m: str) -> str:
 
 def map_model_alias(maybe: Optional[str]) -> Optional[str]:
     """
-    Map friendly aliases (Cursor/OpenAI model strings) into Anthropic model IDs.
+    Map friendly aliases (OpenAI-ish model strings) into Anthropic model IDs.
     If unknown, return None (let routing decide).
     """
     if not maybe:
         return None
 
-    # NEW: strip your proof prefix if Cursor sends it back
     maybe = strip_model_prefix(maybe)
     if not maybe:
         return None
@@ -333,7 +351,6 @@ def normalize_openai_content_to_text(content: OAContent) -> str:
         return ""
     if isinstance(content, str):
         return content
-    # If Cursor sends content parts (list/dict), stringify safely.
     try:
         return json.dumps(content, ensure_ascii=False)
     except Exception:
@@ -432,6 +449,7 @@ async def debug_headers(req: Request):
         "has_x_origin_secret": bool(req.headers.get("x-origin-secret")),
         "x_origin_secret_len": len(req.headers.get("x-origin-secret") or ""),
         "has_x_api_key": bool(req.headers.get("x-api-key")),
+        "has_api_key": bool(req.headers.get("api-key")),
         "has_authorization": bool(req.headers.get("authorization")),
         "has_cf_access_id": bool(req.headers.get("cf-access-client-id")),
         "has_cf_access_secret": bool(req.headers.get("cf-access-client-secret")),
@@ -500,7 +518,7 @@ async def chat(req: Request, body: ChatReq):
     return data
 
 # -------------------------------------------
-# OpenAI-compatible endpoint for Cursor
+# OpenAI-compatible endpoint
 # -------------------------------------------
 @app.post("/v1/chat/completions")
 async def openai_chat_completions(req: Request, body: OAChatReq):
@@ -508,11 +526,9 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
     if len(raw) > MAX_BODY_BYTES:
         raise HTTPException(status_code=413, detail="Payload too large")
 
-    # Cursor can work without streaming; add later if you want
-    # Cursor often sends stream=true. We don't SSE-stream yet, so just ignore and return normal JSON.
+    # Many clients send stream=true. We don't SSE-stream yet, so ignore and return non-stream JSON.
     if body.stream:
         log.info("OA stream=true requested; ignoring and returning non-stream response")
-
 
     ray = req.headers.get("cf-ray") or ""
     t0 = time.time()
@@ -632,12 +648,10 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
 
     return response
 
-
 # === COMPATIBILITY ALIAS (some clients use non-versioned path) ===
 @app.post("/chat/completions")
 async def chat_completions_alias(req: Request, body: OAChatReq):
     return await openai_chat_completions(req, body)
-
 
 # -------------------------
 # OpenAI-compatible models
@@ -655,6 +669,8 @@ async def openai_models(req: Request):
             {"id": with_model_prefix("opus"), "object": "model"},
             {"id": with_model_prefix(DEFAULT_MODEL), "object": "model"},
             {"id": with_model_prefix(OPUS_MODEL), "object": "model"},
+
+            # Also include unprefixed for compatibility
             {"id": "sonnet", "object": "model"},
             {"id": "opus", "object": "model"},
             {"id": DEFAULT_MODEL, "object": "model"},
@@ -666,7 +682,6 @@ async def openai_models(req: Request):
     resp.headers["X-Gateway"] = "gursimanoor-gateway"
     resp.headers["X-Model-Source"] = "custom"
     return resp
-
 
 # === COMPATIBILITY ALIAS (some clients use non-versioned path) ===
 @app.get("/models")
