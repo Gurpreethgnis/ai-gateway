@@ -86,6 +86,17 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     log.error(traceback.format_exc())
     return JSONResponse(status_code=500, content={"detail": "Internal error"})
 
+# -----------------------------------------------------
+# Root: helpful for sanity checks + keeps Cursor happy
+# -----------------------------------------------------
+@app.get("/")
+def root():
+    return {"ok": True, "service": "ai-gateway"}
+
+# =====================================================
+# REQUEST LOGGING
+# =====================================================
+
 @app.middleware("http")
 async def request_log_middleware(request: Request, call_next):
     t0 = time.time()
@@ -93,10 +104,11 @@ async def request_log_middleware(request: Request, call_next):
     dt_ms = int((time.time() - t0) * 1000)
     ray = request.headers.get("cf-ray") or ""
     ua = request.headers.get("user-agent") or ""
-    log.info("REQ %s %s -> %s (%sms) cf-ray=%s ua=%s",
-             request.method, request.url.path, resp.status_code, dt_ms, ray, ua[:120])
+    log.info(
+        "REQ %s %s -> %s (%sms) cf-ray=%s ua=%s",
+        request.method, request.url.path, resp.status_code, dt_ms, ray, ua[:120]
+    )
     return resp
-
 
 # =====================================================
 # AUTH HELPERS
@@ -119,13 +131,42 @@ def extract_gateway_api_key(request: Request) -> Optional[str]:
 
     return None
 
+def is_public_path(path: str) -> bool:
+    """
+    Allow Cloudflare/cdn-cgi/browser-check assets and other non-API paths.
+    Cursor/Electron can trigger these.
+    """
+    if path in ("/", "/favicon.ico"):
+        return True
+    if path.startswith("/js/"):
+        return True
+    if path.startswith("/cdn-cgi/"):
+        return True
+    return False
+
+def is_protected_api_path(path: str) -> bool:
+    """
+    Only enforce API auth on the actual endpoints you care about.
+    """
+    return path.startswith("/v1/") or path in ("/chat", "/health", "/debug/origin", "/debug/headers")
+
 # =====================================================
-# MIDDLEWARE: AUTH ON ALL REQUESTS
+# MIDDLEWARE: SECURITY (ONLY FOR API PATHS)
 # =====================================================
 
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
     try:
+        path = request.url.path
+
+        # Let CF/browser-check/static stuff through without API auth
+        if is_public_path(path):
+            return await call_next(request)
+
+        # If it's not one of our API endpoints, don't require auth
+        if not is_protected_api_path(path):
+            return await call_next(request)
+
         # 1) Origin lockdown (Cloudflare → Railway only)
         if ORIGIN_SECRET:
             got = request.headers.get("x-origin-secret")
@@ -341,6 +382,7 @@ async def debug_headers(req: Request):
         "has_cf_access_secret": bool(req.headers.get("cf-access-client-secret")),
         "has_cf_ray": bool(req.headers.get("cf-ray")),
         "host": req.headers.get("host"),
+        "path": req.url.path,
     }
 
 # ---------------------
@@ -435,7 +477,6 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
             if role == "user" and content_text:
                 user_join.append(content_text)
         else:
-            # ignore tool/other roles for now
             continue
 
     system_text = "\n\n".join(system_parts).strip()
@@ -513,7 +554,7 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
         "id": f"chatcmpl_{hashlib.sha1((ray + str(time.time())).encode()).hexdigest()[:16]}",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": f"MYMODEL:{model}",  # <-- your proof inside the response payload
+        "model": f"MYMODEL:{model}",
         "choices": [
             {
                 "index": 0,
@@ -551,4 +592,3 @@ async def openai_models(req: Request):
             {"id": OPUS_MODEL, "object": "model"},
         ],
     }
-
