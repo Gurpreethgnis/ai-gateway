@@ -161,7 +161,6 @@ OpenAIRole = Literal["system", "user", "assistant", "tool", "developer"]
 class OAChatMessage(BaseModel):
     role: OpenAIRole
     content: Optional[str] = None
-    # ignore tool calls/etc for now (Cursor basic usage doesn’t require them)
 
 class OAChatReq(BaseModel):
     model: Optional[str] = None
@@ -175,7 +174,7 @@ class OAChatReq(BaseModel):
 # =====================================================
 
 def is_hard_task(text: str) -> bool:
-    t = text.lower()
+    t = (text or "").lower()
     return any(
         k in t for k in [
             "architecture", "design doc", "production", "incident",
@@ -187,31 +186,27 @@ def is_hard_task(text: str) -> bool:
 def map_model_alias(maybe: Optional[str]) -> Optional[str]:
     """
     Map friendly aliases (Cursor/OpenAI model strings) into Anthropic model IDs.
-    If unknown, just let routing decide (None) unless it's already an Anthropic ID.
+    If unknown, return None so routing decides.
     """
     if not maybe:
         return None
 
     m = maybe.strip().lower()
 
-    # common friendly aliases
+    # Friendly aliases
     if m in ("sonnet", "sonnet-4", "sonnet4", "claude-sonnet", "claude-sonnet-4"):
         return DEFAULT_MODEL
     if m in ("opus", "opus-4", "opus4", "claude-opus", "claude-opus-4"):
         return OPUS_MODEL
 
-    # if they already passed a real Anthropic model id, allow it
+    # If they already passed a real Anthropic model id, allow it
     if m.startswith("claude-"):
         return maybe
 
-    # unknown "gpt-4o" etc: ignore and let routing choose
+    # Unknown "gpt-4o" etc: ignore and let routing choose
     return None
 
 def route_model_from_messages(user_text: str, explicit_model: Optional[str]) -> str:
-    """
-    Decide Anthropic model. If explicit model maps, use it.
-    Otherwise route based on hard-task heuristic.
-    """
     mapped = map_model_alias(explicit_model)
     if mapped:
         return mapped
@@ -270,8 +265,7 @@ def extract_usage(resp) -> Optional[Dict[str, Any]]:
 
 def anthropic_to_openai_usage(usage: Optional[Dict[str, Any]]) -> Optional[Dict[str, int]]:
     """
-    Cursor expects OpenAI-style usage sometimes.
-    Anthropic usage keys: input_tokens, output_tokens, ...
+    Cursor/OpenAI-style usage: prompt_tokens, completion_tokens, total_tokens
     """
     if not usage:
         return None
@@ -317,7 +311,10 @@ async def debug_headers(req: Request):
         "x_origin_secret_len": len(req.headers.get("x-origin-secret") or ""),
         "has_x_api_key": bool(req.headers.get("x-api-key")),
         "has_authorization": bool(req.headers.get("authorization")),
+        "has_cf_access_id": bool(req.headers.get("cf-access-client-id")),
+        "has_cf_access_secret": bool(req.headers.get("cf-access-client-secret")),
         "has_cf_ray": bool(req.headers.get("cf-ray")),
+        "host": req.headers.get("host"),
     }
 
 # ---------------------
@@ -332,7 +329,6 @@ async def chat(req: Request, body: ChatReq):
     ray = req.headers.get("cf-ray") or ""
     t0 = time.time()
 
-    # model routing
     joined_user = "\n".join(m.content for m in body.messages if m.role == "user")
     model = route_model_from_messages(joined_user, body.model)
 
@@ -415,6 +411,10 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
             # ignore tool/other roles for now
             continue
 
+    # Anthropic messages should start with user; Cursor can sometimes start with assistant
+    if aa_messages and aa_messages[0]["role"] != "user":
+        aa_messages.insert(0, {"role": "user", "content": " "})
+
     system_text = "\n\n".join(system_parts).strip()
 
     # Determine model
@@ -439,7 +439,6 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
         cached = cache_get(key)
         if cached and isinstance(cached, dict) and "text" in cached:
             out_text = cached.get("text", "")
-            # OpenAI-style response
             resp_json = {
                 "id": f"chatcmpl_cached_{key[:12]}",
                 "object": "chat.completion",
@@ -476,12 +475,10 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
 
     usage = extract_usage(resp)
 
-    # store cache in your existing compact format
     cache_blob = {"cached": False, "model": model, "text": out_text, "usage": usage}
     if key:
         cache_set(key, cache_blob, CACHE_TTL_SECONDS)
 
-    # OpenAI-style response
     resp_json = {
         "id": f"chatcmpl_{hashlib.sha1((ray + str(time.time())).encode()).hexdigest()[:16]}",
         "object": "chat.completion",
@@ -501,3 +498,18 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
     log.info("OA OK (cf-ray=%s) model=%s ms=%s", ray, model, dt_ms)
 
     return resp_json
+
+# -------------------------------------------
+# OpenAI-compatible models endpoint (Cursor often calls this)
+# -------------------------------------------
+@app.get("/v1/models")
+async def openai_models():
+    return {
+        "object": "list",
+        "data": [
+            {"id": "sonnet", "object": "model"},
+            {"id": "opus", "object": "model"},
+            {"id": DEFAULT_MODEL, "object": "model"},
+            {"id": OPUS_MODEL, "object": "model"},
+        ],
+    }
