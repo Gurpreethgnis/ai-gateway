@@ -524,6 +524,17 @@ async def chat(req: Request, body: ChatReq):
 @app.post("/v1/chat/completions")
 async def openai_chat_completions(req: Request, body: OAChatReq):
     raw = await req.body()
+
+    # DEBUG: inspect incoming structure
+    try:
+        parsed = json.loads(raw)
+        log.info("OA INCOMING KEYS: %s", list(parsed.keys()))
+        log.info("OA HAS tools: %s", "tools" in parsed)
+        log.info("OA HAS functions: %s", "functions" in parsed)
+        log.info("OA HAS tool_choice: %s", "tool_choice" in parsed)
+    except Exception:
+        pass
+        
     if len(raw) > MAX_BODY_BYTES:
         raise HTTPException(status_code=413, detail="Payload too large")
 
