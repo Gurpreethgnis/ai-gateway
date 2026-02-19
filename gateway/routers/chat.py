@@ -1,0 +1,67 @@
+import time
+import traceback
+from fastapi import APIRouter, Request, HTTPException
+
+from gateway.models import ChatReq
+from gateway.routing import route_model_from_messages
+from gateway.anthropic_client import call_anthropic_with_timeout, extract_text_from_anthropic, extract_usage
+from gateway.cache import cache_key, cache_get, cache_set
+from gateway.config import MAX_BODY_BYTES, CACHE_TTL_SECONDS
+from gateway.logging_setup import log
+
+router = APIRouter()
+
+@router.post("/chat")
+async def chat(req: Request, body: ChatReq):
+    raw = await req.body()
+    if len(raw) > MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="Payload too large")
+
+    ray = req.headers.get("cf-ray") or ""
+    t0 = time.time()
+
+    joined_user = "\n".join(m.content for m in body.messages if m.role == "user")
+    model = route_model_from_messages(joined_user, body.model)
+
+    payload = {
+        "model": model,
+        "system": body.system or "",
+        "messages": [{"role": m.role, "content": m.content} for m in body.messages],
+        "max_tokens": body.max_tokens,
+        "temperature": body.temperature,
+    }
+
+    do_cache = body.temperature is None or body.temperature <= 0.3
+    key = cache_key(payload) if do_cache else None
+
+    if key:
+        cached = cache_get(key)
+        if cached:
+            cached["cached"] = True
+            return cached
+
+    try:
+        resp = await call_anthropic_with_timeout(payload)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("CHAT UPSTREAM ERROR (cf-ray=%s): %r", ray, e)
+        log.error(traceback.format_exc())
+        raise HTTPException(status_code=502, detail="Upstream model error")
+
+    try:
+        text = extract_text_from_anthropic(resp)
+    except Exception as e:
+        log.error("CHAT PARSE ERROR (cf-ray=%s): %r", ray, e)
+        log.error(traceback.format_exc())
+        raise HTTPException(status_code=502, detail="Upstream response parse error")
+
+    usage = extract_usage(resp)
+    data = {"cached": False, "model": model, "text": text, "usage": usage}
+
+    if key:
+        cache_set(key, data, CACHE_TTL_SECONDS)
+
+    dt_ms = int((time.time() - t0) * 1000)
+    log.info("CHAT OK (cf-ray=%s) model=%s ms=%s cached=%s", ray, model, dt_ms, False)
+    return data
