@@ -526,10 +526,6 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
     if len(raw) > MAX_BODY_BYTES:
         raise HTTPException(status_code=413, detail="Payload too large")
 
-    # Many clients send stream=true. We don't SSE-stream yet, so ignore and return non-stream JSON.
-    if body.stream:
-        log.info("OA stream=true requested; ignoring and returning non-stream response")
-
     ray = req.headers.get("cf-ray") or ""
     t0 = time.time()
 
@@ -549,14 +545,11 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
             aa_messages.append({"role": role, "content": content_text})
             if role == "user" and content_text:
                 user_join.append(content_text)
-        else:
-            continue
 
     system_text = "\n\n".join(system_parts).strip()
-
     joined_user = "\n".join(user_join)
-    model = route_model_from_messages(joined_user, body.model)
 
+    model = route_model_from_messages(joined_user, body.model)
     max_tokens = int(body.max_tokens or DEFAULT_MAX_TOKENS)
     temperature = body.temperature if body.temperature is not None else 0.2
 
@@ -571,31 +564,68 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
     do_cache = temperature <= 0.3
     key = cache_key(payload) if do_cache else None
 
-    # Cache hit
+    # Cache hit (works for both stream and non-stream)
     if key:
         cached = cache_get(key)
         if cached and isinstance(cached, dict) and "text" in cached:
             out_text = cached.get("text", "")
+            usage_cached = cached.get("usage")
+
+            # If client asked for stream, stream cached text too
+            if body.stream:
+                async def event_gen_cached():
+                    chunk_id = f"chatcmpl_cached_{key[:12]}"
+                    created = int(time.time())
+                    text = out_text or ""
+                    step = 60
+                    for i in range(0, len(text), step):
+                        piece = text[i:i+step]
+                        event = {
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": with_model_prefix(str(cached.get("model", model))),
+                            "choices": [{"index": 0, "delta": {"content": piece}}],
+                        }
+                        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+                    # final chunk
+                    final = {
+                        "id": chunk_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": with_model_prefix(str(cached.get("model", model))),
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    }
+                    yield f"data: {json.dumps(final, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                resp = StreamingResponse(event_gen_cached(), media_type="text/event-stream")
+                resp.headers["Cache-Control"] = "no-cache"
+                resp.headers["Connection"] = "keep-alive"
+                resp.headers["X-Accel-Buffering"] = "no"
+                resp.headers["X-Gateway"] = "gursimanoor-gateway"
+                resp.headers["X-Model-Source"] = "custom"
+                resp.headers["X-Cache"] = "HIT"
+                dt_ms = int((time.time() - t0) * 1000)
+                log.info("OA OK CACHED STREAM (cf-ray=%s) model=%s ms=%s", ray, model, dt_ms)
+                return resp
+
+            # normal JSON cached response
             resp_json = {
                 "id": f"chatcmpl_cached_{key[:12]}",
                 "object": "chat.completion",
                 "created": int(time.time()),
                 "model": with_model_prefix(str(cached.get("model", model))),
                 "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": out_text},
-                        "finish_reason": "stop",
-                    }
+                    {"index": 0, "message": {"role": "assistant", "content": out_text}, "finish_reason": "stop"}
                 ],
-                "usage": anthropic_to_openai_usage(cached.get("usage")),
+                "usage": anthropic_to_openai_usage(usage_cached),
             }
-
             response = JSONResponse(content=resp_json)
             response.headers["X-Gateway"] = "gursimanoor-gateway"
             response.headers["X-Model-Source"] = "custom"
             response.headers["X-Cache"] = "HIT"
-
             dt_ms = int((time.time() - t0) * 1000)
             log.info("OA OK CACHED (cf-ray=%s) model=%s ms=%s", ray, model, dt_ms)
             return response
@@ -619,21 +649,59 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
 
     usage = extract_usage(resp)
 
+    # write cache
     cache_blob = {"cached": False, "model": model, "text": out_text, "usage": usage}
     if key:
         cache_set(key, cache_blob, CACHE_TTL_SECONDS)
 
+    # If stream requested, return SSE
+    if body.stream:
+        async def event_gen():
+            chunk_id = f"chatcmpl_{hashlib.sha1((ray + str(time.time())).encode()).hexdigest()[:16]}"
+            created = int(time.time())
+            text = out_text or ""
+            step = 60  # chunk size; adjust if you want
+
+            for i in range(0, len(text), step):
+                piece = text[i:i+step]
+                event = {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": with_model_prefix(model),
+                    "choices": [{"index": 0, "delta": {"content": piece}}],
+                }
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+            final = {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": with_model_prefix(model),
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }
+            yield f"data: {json.dumps(final, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        response = StreamingResponse(event_gen(), media_type="text/event-stream")
+        response.headers["Cache-Control"] = "no-cache"
+        response.headers["Connection"] = "keep-alive"
+        response.headers["X-Accel-Buffering"] = "no"
+        response.headers["X-Gateway"] = "gursimanoor-gateway"
+        response.headers["X-Model-Source"] = "custom"
+        response.headers["X-Cache"] = "MISS"
+        dt_ms = int((time.time() - t0) * 1000)
+        log.info("OA OK STREAM (cf-ray=%s) model=%s ms=%s", ray, model, dt_ms)
+        return response
+
+    # Non-stream JSON response
     resp_json = {
         "id": f"chatcmpl_{hashlib.sha1((ray + str(time.time())).encode()).hexdigest()[:16]}",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": with_model_prefix(model),
         "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": out_text},
-                "finish_reason": "stop",
-            }
+            {"index": 0, "message": {"role": "assistant", "content": out_text}, "finish_reason": "stop"}
         ],
         "usage": anthropic_to_openai_usage(usage),
     }
@@ -645,8 +713,8 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
 
     dt_ms = int((time.time() - t0) * 1000)
     log.info("OA OK (cf-ray=%s) model=%s ms=%s", ray, model, dt_ms)
-
     return response
+
 
 # === COMPATIBILITY ALIAS (some clients use non-versioned path) ===
 @app.post("/chat/completions")
