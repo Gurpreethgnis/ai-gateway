@@ -245,4 +245,102 @@ async def openai_chat_completions(req: Request, body: OAChatReq):
 
         response = StreamingResponse(sse_stream(), media_type="text/event-stream")
         response.headers["Cache-Control"] = "no-cache"
-        re
+        response.headers["Connection"] = "keep-alive"
+        response.headers["X-Accel-Buffering"] = "no"
+        response.headers["X-Gateway"] = "gursimanoor-gateway"
+        response.headers["X-Model-Source"] = "custom"
+        response.headers["X-Cache"] = "MISS"
+        response.headers["X-Reduction"] = "1"
+        dt_ms = int((time.time() - t0) * 1000)
+        log.info("OA OK STREAM (cf-ray=%s) model=%s ms=%s tools=%s", ray, model, dt_ms, bool(aa_tools))
+        return response
+
+    # Non-stream upstream
+    try:
+        resp = await call_anthropic_with_timeout(payload)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("OA UPSTREAM ERROR (cf-ray=%s): %r", ray, e)
+        log.error(traceback.format_exc())
+        raise HTTPException(status_code=502, detail="Upstream model error")
+
+    out_text_parts: List[str] = []
+    tool_calls: List[Dict[str, Any]] = []
+    try:
+        for block in getattr(resp, "content", []) or []:
+            btype = getattr(block, "type", None)
+            if btype == "text":
+                out_text_parts.append(getattr(block, "text", "") or "")
+            elif btype == "tool_use":
+                tool_use_id = getattr(block, "id", "") or ""
+                name = getattr(block, "name", "") or ""
+                tool_input = getattr(block, "input", {}) or {}
+                if tool_use_id and name:
+                    tool_calls.append({"id": tool_use_id, "type": "function",
+                                      "function": {"name": name, "arguments": ensure_json_args_str(tool_input)}})
+    except Exception as e:
+        log.error("OA PARSE ERROR (cf-ray=%s): %r", ray, e)
+        log.error(traceback.format_exc())
+        raise HTTPException(status_code=502, detail="Upstream response parse error")
+
+    out_text = "".join(out_text_parts)
+    usage = extract_usage(resp)
+
+    cache_blob = {"cached": False, "model": model, "text": out_text, "usage": usage, "tool_calls": (tool_calls or None)}
+    if key and not tool_calls:
+        cache_set(key, cache_blob, CACHE_TTL_SECONDS)
+
+    finish_reason = "stop"
+    message_obj: Dict[str, Any] = {"role": "assistant", "content": out_text}
+    if tool_calls:
+        message_obj["tool_calls"] = tool_calls
+        finish_reason = "tool_calls"
+
+    resp_json = {
+        "id": f"chatcmpl_{hashlib.sha1((ray + str(time.time())).encode()).hexdigest()[:16]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": with_model_prefix(model),
+        "choices": [{"index": 0, "message": message_obj, "finish_reason": finish_reason}],
+        "usage": anthropic_to_openai_usage(usage),
+    }
+
+    response = JSONResponse(content=resp_json)
+    response.headers["X-Gateway"] = "gursimanoor-gateway"
+    response.headers["X-Model-Source"] = "custom"
+    response.headers["X-Cache"] = "MISS"
+    response.headers["X-Reduction"] = "1"
+    return response
+
+@router.post("/chat/completions")
+async def chat_completions_alias(req: Request, body: OAChatReq):
+    return await openai_chat_completions(req, body)
+
+@router.get("/v1/models")
+async def openai_models(req: Request):
+    ray = req.headers.get("cf-ray") or ""
+    ua = req.headers.get("user-agent") or ""
+    log.info("MODELS HIT cf-ray=%s ua=%s", ray, ua[:120])
+
+    payload = {
+        "object": "list",
+        "data": [
+            {"id": with_model_prefix("sonnet"), "object": "model"},
+            {"id": with_model_prefix("opus"), "object": "model"},
+            {"id": with_model_prefix(DEFAULT_MODEL), "object": "model"},
+            {"id": with_model_prefix(OPUS_MODEL), "object": "model"},
+            {"id": "sonnet", "object": "model"},
+            {"id": "opus", "object": "model"},
+            {"id": DEFAULT_MODEL, "object": "model"},
+            {"id": OPUS_MODEL, "object": "model"},
+        ],
+    }
+    resp = JSONResponse(content=payload)
+    resp.headers["X-Gateway"] = "gursimanoor-gateway"
+    resp.headers["X-Model-Source"] = "custom"
+    return resp
+
+@router.get("/models")
+async def models_alias(req: Request):
+    return await openai_models(req)
