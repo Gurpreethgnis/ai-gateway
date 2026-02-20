@@ -240,7 +240,7 @@ async def openai_chat_completions(req: Request):
             tool_call_id = tool_call_id or ""
             tool_text, _tmeta = strip_or_truncate("tool", content_text, LIMITS["tool_result_max"], allow_strip=False)
 
-            if ENABLE_FILE_HASH_CACHE and project_id:
+            if ENABLE_FILE_HASH_CACHE:
                 try:
                     from gateway.file_cache import process_tool_result
                     tool_text = await process_tool_result(project_id, tool_text, tool_name=None)
