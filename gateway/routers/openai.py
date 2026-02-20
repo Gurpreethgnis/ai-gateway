@@ -610,7 +610,14 @@ async def openai_chat_completions(req: Request):
                         except Exception:
                             pass
 
-                        asyncio.run_coroutine_threadsafe(q.put(("error", str(e))), loop)
+                        err_msg = str(e)
+                        if getattr(e, "response", None) is not None:
+                            try:
+                                j = e.response.json()
+                                err_msg = j.get("error", {}).get("message", err_msg)
+                            except Exception:
+                                pass
+                        asyncio.run_coroutine_threadsafe(q.put(("error", err_msg)), loop)
                         break
 
             loop.run_in_executor(None, _worker_stream)
@@ -629,7 +636,7 @@ async def openai_chat_completions(req: Request):
                         "object": "chat.completion.chunk",
                         "created": created,
                         "model": with_model_prefix(model),
-                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                        "choices": [{"index": 0, "delta": {"content": f"\n\n[Upstream Error: {payload_item}]"}, "finish_reason": "stop"}],
                     }
                     yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
                     yield "data: [DONE]\n\n"
