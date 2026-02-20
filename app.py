@@ -31,6 +31,18 @@ async def lifespan(app: FastAPI):
             from gateway.db import init_db, create_tables
             init_db()
             await create_tables()
+            
+            # Manual migration for new columns
+            from sqlalchemy import text
+            from gateway.db import engine
+            async with engine.begin() as conn:
+                try:
+                    await conn.execute(text("ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS cache_read_input_tokens INTEGER DEFAULT 0"))
+                    await conn.execute(text("ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS cache_creation_input_tokens INTEGER DEFAULT 0"))
+                    log.info("Database migration (cache columns) applied successfully")
+                except Exception as e:
+                    log.debug("Migration already applied or failed: %r", e)
+            
             log.info("Database initialized successfully")
         except Exception as e:
             log.warning("Database initialization failed: %r", e)
