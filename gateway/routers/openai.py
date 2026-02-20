@@ -538,64 +538,80 @@ async def openai_chat_completions(req: Request):
             increment_active_requests(model)
 
             def _worker_stream():
-                try:
-                    with client.messages.stream(**payload) as stream:
-                        for ev in stream:
-                            etype = getattr(ev, "type", None) or (ev.get("type") if isinstance(ev, dict) else None)
+                import time
+                from gateway.retry import is_retryable_error
+                from gateway.anthropic_client import log_anthropic_error
+                max_attempts = 3
 
-                            if etype in ("content_block_start", "content_block_delta", "content_block_stop"):
-                                block = getattr(ev, "content_block", None) or (ev.get("content_block") if isinstance(ev, dict) else None)
-                                delta = getattr(ev, "delta", None) or (ev.get("delta") if isinstance(ev, dict) else None)
-
-                                btype = getattr(block, "type", None) if block is not None else None
-                                if btype is None and isinstance(block, dict):
-                                    btype = block.get("type")
-
-                                if etype == "content_block_delta" and delta is not None:
-                                    delta_type = getattr(delta, "type", None) if not isinstance(delta, dict) else delta.get("type")
-                                    if delta_type == "text_delta":
-                                        txt = getattr(delta, "text", None) if not isinstance(delta, dict) else delta.get("text")
-                                        if txt:
-                                            asyncio.run_coroutine_threadsafe(q.put(("text", txt)), loop)
-                                    elif delta_type == "input_json_delta":
-                                        partial_json = getattr(delta, "partial_json", None) if not isinstance(delta, dict) else delta.get("partial_json")
-                                        if partial_json:
-                                            asyncio.run_coroutine_threadsafe(q.put(("tool_args_delta", partial_json)), loop)
-
-                                if etype == "content_block_start" and btype == "tool_use":
-                                    if isinstance(block, dict):
-                                        tool_use_id = block.get("id") or ""
-                                        tool_name = block.get("name") or ""
-                                    else:
-                                        tool_use_id = getattr(block, "id", "") or ""
-                                        tool_name = getattr(block, "name", "") or ""
-
-                                    if tool_use_id and tool_name:
-                                        tc = {
-                                            "id": tool_use_id,
-                                            "type": "function",
-                                            "function": {
-                                                "name": tool_name,
-                                                "arguments": "",
-                                            },
-                                        }
-                                        asyncio.run_coroutine_threadsafe(q.put(("tool_call_start", tc)), loop)
-
-                            if etype in ("message_stop", "message_end"):
-                                break
-
-                        final = stream.get_final_message()
-                        usage = extract_usage(final)
-                        asyncio.run_coroutine_threadsafe(q.put(("done", usage)), loop)
-
-                except Exception as e:
+                for attempt in range(max_attempts):
+                    yielded_any = False
                     try:
-                        from gateway.anthropic_client import log_anthropic_error
-                        log_anthropic_error("ANTHROPIC stream failed", payload, e)
-                    except Exception:
-                        pass
+                        with client.messages.stream(**payload) as stream:
+                            for ev in stream:
+                                etype = getattr(ev, "type", None) or (ev.get("type") if isinstance(ev, dict) else None)
 
-                    asyncio.run_coroutine_threadsafe(q.put(("error", str(e))), loop)
+                                if etype in ("content_block_start", "content_block_delta", "content_block_stop"):
+                                    block = getattr(ev, "content_block", None) or (ev.get("content_block") if isinstance(ev, dict) else None)
+                                    delta = getattr(ev, "delta", None) or (ev.get("delta") if isinstance(ev, dict) else None)
+
+                                    btype = getattr(block, "type", None) if block is not None else None
+                                    if btype is None and isinstance(block, dict):
+                                        btype = block.get("type")
+
+                                    if etype == "content_block_delta" and delta is not None:
+                                        delta_type = getattr(delta, "type", None) if not isinstance(delta, dict) else delta.get("type")
+                                        if delta_type == "text_delta":
+                                            txt = getattr(delta, "text", None) if not isinstance(delta, dict) else delta.get("text")
+                                            if txt:
+                                                yielded_any = True
+                                                asyncio.run_coroutine_threadsafe(q.put(("text", txt)), loop)
+                                        elif delta_type == "input_json_delta":
+                                            partial_json = getattr(delta, "partial_json", None) if not isinstance(delta, dict) else delta.get("partial_json")
+                                            if partial_json:
+                                                yielded_any = True
+                                                asyncio.run_coroutine_threadsafe(q.put(("tool_args_delta", partial_json)), loop)
+
+                                    if etype == "content_block_start" and btype == "tool_use":
+                                        if isinstance(block, dict):
+                                            tool_use_id = block.get("id") or ""
+                                            tool_name = block.get("name") or ""
+                                        else:
+                                            tool_use_id = getattr(block, "id", "") or ""
+                                            tool_name = getattr(block, "name", "") or ""
+
+                                        if tool_use_id and tool_name:
+                                            tc = {
+                                                "id": tool_use_id,
+                                                "type": "function",
+                                                "function": {
+                                                    "name": tool_name,
+                                                    "arguments": "",
+                                                },
+                                            }
+                                            yielded_any = True
+                                            asyncio.run_coroutine_threadsafe(q.put(("tool_call_start", tc)), loop)
+
+                                if etype in ("message_stop", "message_end"):
+                                    break
+
+                            final = stream.get_final_message()
+                            usage = extract_usage(final)
+                            asyncio.run_coroutine_threadsafe(q.put(("done", usage)), loop)
+                            return
+
+                    except Exception as e:
+                        if not yielded_any and attempt < max_attempts - 1 and is_retryable_error(e):
+                            log.warning("STREAM Retry attempt %d/%d after error: %r", attempt + 1, max_attempts, e)
+                            time.sleep(1.0 * (2 ** attempt))
+                            continue
+
+                        try:
+                            log_anthropic_error("ANTHROPIC stream failed", payload, e)
+                        except Exception:
+                            pass
+
+                        asyncio.run_coroutine_threadsafe(q.put(("error", str(e))), loop)
+                        break
 
             loop.run_in_executor(None, _worker_stream)
 
