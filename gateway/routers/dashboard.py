@@ -242,89 +242,111 @@ DASHBOARD_HTML = """
 
 @router.get("/dashboard", response_class=HTMLResponse)
 async def get_dashboard(request: Request):
-    async with get_session() as session:
-        # Aggregates
-        total_q = await session.execute(
-            select(
-                func.sum(UsageRecord.input_tokens),
-                func.sum(UsageRecord.cache_read_input_tokens),
-                func.sum(UsageRecord.cache_creation_input_tokens),
-                func.sum(UsageRecord.cost_usd)
-            )
-        )
-        result = total_q.fetchone()
-        if result:
-            total_input, total_cached, total_creation, total_cost = result
-        else:
-            total_input, total_cached, total_creation, total_cost = 0, 0, 0, 0
-        
-        total_input = total_input or 0
-        total_cached = total_cached or 0
-        total_creation = total_creation or 0
-        total_cost = total_cost or 0
-        
-        # Real input includes cached ones
-        total_processed = total_input # Our updated record_usage_to_db stores total_prompt in input_tokens
-        efficiency = round((total_cached / total_processed * 100) if total_processed > 0 else 0, 1)
-        # Estimate savings based on Sonnet pricing ($3 per 1m tokens for input)
-        savings_usd = round((total_cached / 1000000.0) * 3.0, 4)
-        
-        # Redis stats
-        active_connections = 0
-        from gateway.cache import rds
-        if rds:
+    try:
+        async with get_session() as session:
+            # Aggregates
             try:
-                # Approximate active connections from the sonnet queue
-                active_connections = rds.zcard("concurrency:anthropic:sonnet") or 0
+                total_q = await session.execute(
+                    select(
+                        func.sum(UsageRecord.input_tokens),
+                        func.sum(UsageRecord.cache_read_input_tokens),
+                        func.sum(UsageRecord.cache_creation_input_tokens),
+                        func.sum(UsageRecord.cost_usd)
+                    )
+                )
+                result = total_q.fetchone()
+                if result:
+                    total_input, total_cached, total_creation, total_cost = result
+                else:
+                    total_input, total_cached, total_creation, total_cost = 0, 0, 0, 0
+            except Exception as e:
+                import logging
+                logging.getLogger("gateway").error("Dashboard aggregate query failed: %r", e)
+                total_input, total_cached, total_creation, total_cost = 0, 0, 0, 0
+
+            total_input = total_input or 0
+            total_cached = total_cached or 0
+            total_creation = total_creation or 0
+            total_cost = total_cost or 0
+            
+            total_processed = total_input
+            efficiency = round((total_cached / total_processed * 100) if total_processed > 0 else 0, 1)
+            savings_usd = round((total_cached / 1000000.0) * 3.0, 4)
+            
+            active_connections = 0
+            try:
+                from gateway.cache import rds
+                if rds:
+                    active_connections = rds.zcard("concurrency:anthropic:sonnet") or 0
             except:
                 pass
 
-        # Recent records
-        recent_q = await session.execute(
-            select(UsageRecord).order_by(UsageRecord.timestamp.desc()).limit(20)
-        )
-        recent_rows = recent_q.scalars().all()
-        
-        processed_recent = []
-        for r in recent_rows:
-            # We updated the usage record to store total input in input_tokens
-            total_in = r.input_tokens
-            cache_r = r.cache_read_input_tokens
-            savings_pct = round((cache_r / total_in * 100) if total_in > 0 else 0, 1)
-            
-            processed_recent.append({
-                "timestamp": r.timestamp.strftime("%H:%M:%S"),
-                "model": r.model.replace("claude-3-5-", ""),
-                "input": total_in,
-                "cache_read": cache_r,
-                "output": r.output_tokens,
-                "savings_pct": savings_pct
-            })
+            # Recent records
+            processed_recent = []
+            try:
+                recent_q = await session.execute(
+                    select(UsageRecord).order_by(UsageRecord.timestamp.desc()).limit(20)
+                )
+                recent_rows = recent_q.scalars().all()
+                for r in recent_rows:
+                    total_in = r.input_tokens or 0
+                    cache_r = r.cache_read_input_tokens or 0
+                    savings_pct = round((cache_r / total_in * 100) if total_in > 0 else 0, 1)
+                    
+                    ts = "00:00:00"
+                    if r.timestamp:
+                        ts = r.timestamp.strftime("%H:%M:%S")
 
-    html = DASHBOARD_HTML
-    html = html.replace("{{ total_input }}", f"{total_input:,}")
-    html = html.replace("{{ total_cached }}", f"{total_cached:,}")
-    html = html.replace("{{ efficiency }}", str(efficiency))
-    html = html.replace("{{ savings_usd }}", str(savings_usd))
-    html = html.replace("{{ active_connections }}", str(active_connections))
-    
-    # Simple template rendering for recent rows
-    rows_html = ""
-    for r in processed_recent:
-        badge = '<span class="badge badge-cached">CACHED</span>' if r["cache_read"] > 0 else '<span class="badge badge-miss">MISS</span>'
-        rows_html += f"""
-        <tr>
-            <td>{r['timestamp']}</td>
-            <td style="font-family: monospace; font-size: 0.75rem;">{r['model']}</td>
-            <td>{badge}</td>
-            <td>{r['input']}</td>
-            <td style="color: var(--primary)">{r['cache_read']}</td>
-            <td>{r['output']}</td>
-            <td>{r['savings_pct']}%</td>
-        </tr>
-        """
-    
-    # This is a bit hacky but avoids adding Jinja2 dependency if not already there
-    final_html = html.split('{% for row in recent %}')[0] + rows_html + html.split('{% endfor %}')[1]
-    
-    return final_html
+                    processed_recent.append({
+                        "timestamp": ts,
+                        "model": (r.model or "unknown").replace("claude-3-5-", ""),
+                        "input": total_in,
+                        "cache_read": cache_r,
+                        "output": r.output_tokens or 0,
+                        "savings_pct": savings_pct
+                    })
+            except Exception as e:
+                import logging
+                logging.getLogger("gateway").error("Dashboard recent rows query failed: %r", e)
+
+        html = DASHBOARD_HTML
+        html = html.replace("{{ total_input }}", f"{total_input:,}")
+        html = html.replace("{{ total_cached }}", f"{total_cached:,}")
+        html = html.replace("{{ efficiency }}", str(efficiency))
+        html = html.replace("{{ savings_usd }}", str(savings_usd))
+        html = html.replace("{{ active_connections }}", str(active_connections))
+        
+        rows_html = ""
+        for r in processed_recent:
+            badge = '<span class="badge badge-cached">CACHED</span>' if r["cache_read"] > 0 else '<span class="badge badge-miss">MISS</span>'
+            rows_html += f"""
+            <tr>
+                <td>{r['timestamp']}</td>
+                <td style="font-family: monospace; font-size: 0.75rem;">{r['model']}</td>
+                <td>{badge}</td>
+                <td>{r['input']}</td>
+                <td style="color: var(--primary)">{r['cache_read']}</td>
+                <td>{r['output']}</td>
+                <td>{r['savings_pct']}%</td>
+            </tr>
+            """
+        
+        parts_for = html.split('{% for row in recent %}')
+        parts_end = html.split('{% endfor %}')
+        
+        if len(parts_for) > 1 and len(parts_end) > 1:
+            final_html = parts_for[0] + rows_html + parts_end[1]
+        else:
+            final_html = html # Fallback if split fails
+            
+        return final_html
+
+    except Exception as e:
+        import traceback
+        err_msg = traceback.format_exc()
+        import logging
+        logging.getLogger("gateway").error("CRITICAL DASHBOARD ERROR: %s", err_msg)
+        return HTMLResponse(
+            content=f"<html><body><h1>Dashboard Error</h1><pre>{err_msg}</pre></body></html>",
+            status_code=500
+        )
