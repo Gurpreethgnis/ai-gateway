@@ -137,25 +137,31 @@ async def get_historical_score(project_id: Optional[int], model: str) -> float:
     if not DATABASE_URL or not project_id:
         return 0.0
 
+    import asyncio
     try:
         from gateway.db import get_session, ModelSuccessRate
         from sqlalchemy import select
 
-        async with get_session() as session:
-            result = await session.execute(
-                select(ModelSuccessRate).where(
-                    ModelSuccessRate.project_id == project_id,
-                    ModelSuccessRate.model == model,
+        async def _query():
+            async with get_session() as session:
+                result = await session.execute(
+                    select(ModelSuccessRate).where(
+                        ModelSuccessRate.project_id == project_id,
+                        ModelSuccessRate.model == model,
+                    )
                 )
-            )
-            rate = result.scalar_one_or_none()
+                return result.scalar_one_or_none()
 
-            if rate:
-                total = rate.success_count + rate.failure_count
-                if total > 10:
-                    success_ratio = rate.success_count / total
-                    return (success_ratio - 0.5) * 0.2
+        rate = await asyncio.wait_for(_query(), timeout=2.0)
 
+        if rate:
+            total = rate.success_count + rate.failure_count
+            if total > 10:
+                success_ratio = rate.success_count / total
+                return (success_ratio - 0.5) * 0.2
+
+    except asyncio.TimeoutError:
+        log.warning("Historical score query timed out")
     except Exception as e:
         log.warning("Failed to get historical score: %r", e)
 
