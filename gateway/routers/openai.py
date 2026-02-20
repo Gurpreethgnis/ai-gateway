@@ -212,6 +212,14 @@ async def openai_chat_completions(req: Request):
     user_join: List[str] = []
     last_assistant_tool_use_ids: List[str] = []
     tool_result_index_since_assistant: int = 0
+    pending_tool_result_blocks: List[Dict[str, Any]] = []
+
+    def flush_tool_results():
+        nonlocal tool_result_index_since_assistant
+        if pending_tool_result_blocks:
+            aa_messages.append({"role": "user", "content": pending_tool_result_blocks})
+            pending_tool_result_blocks.clear()
+        tool_result_index_since_assistant = 0
 
     messages_list = parsed.get("messages", [])
     for m in messages_list:
@@ -257,13 +265,53 @@ async def openai_chat_completions(req: Request):
             tool_result_index_since_assistant += 1
 
             if use_id:
-                aa_messages.append({"role": "user", "content": anthropic_tool_result_block(use_id, tool_text)})
+                block = anthropic_tool_result_block(use_id, tool_text)
+                pending_tool_result_blocks.extend(block if isinstance(block, list) else [block])
             else:
+                if pending_tool_result_blocks:
+                    aa_messages.append({"role": "user", "content": pending_tool_result_blocks})
+                    pending_tool_result_blocks = []
                 aa_messages.append({"role": "user", "content": tool_text})
             continue
 
         if role == "user":
-            tool_result_index_since_assistant = 0
+            # User message may be blocks containing tool results (e.g. tool_result_for / tool_call_id)
+            raw_content = m.get("content") if isinstance(m, dict) else getattr(m, "content", None)
+            if isinstance(raw_content, list) and raw_content and all(isinstance(b, dict) for b in raw_content):
+                has_tool_result_key = any(
+                    (b.get("tool_result_for") or b.get("tool_call_id")) for b in raw_content
+                )
+                if has_tool_result_key:
+                    blocks_as_tool_results: List[Dict[str, Any]] = []
+                    idx = 0
+                    for b in raw_content:
+                        tid = b.get("tool_result_for") or b.get("tool_call_id") or ""
+                        part = b.get("content") or b.get("text") or ""
+                        if isinstance(part, list):
+                            part = " ".join(
+                                (x.get("text") or str(x)) for x in part if isinstance(x, dict)
+                            )
+                        elif not isinstance(part, str):
+                            part = str(part) if part else ""
+                        use_id = tid
+                        if last_assistant_tool_use_ids and idx < len(last_assistant_tool_use_ids):
+                            use_id = last_assistant_tool_use_ids[idx]
+                        elif tid:
+                            use_id = tid
+                        idx += 1
+                        if use_id:
+                            tool_text, _ = strip_or_truncate("tool", part, LIMITS["tool_result_max"], allow_strip=False)
+                            blocks_as_tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": use_id,
+                                "content": [{"type": "text", "text": tool_text}],
+                            })
+                    if blocks_as_tool_results:
+                        flush_tool_results()
+                        aa_messages.append({"role": "user", "content": blocks_as_tool_results})
+                        tool_result_index_since_assistant = 0
+                        continue
+            flush_tool_results()
             new_text, _meta = strip_or_truncate("user", content_text, LIMITS["user_msg_max"], allow_strip=False)
             if new_text:
                 user_join.append(new_text)
@@ -271,7 +319,7 @@ async def openai_chat_completions(req: Request):
             continue
 
         if role == "assistant":
-            tool_result_index_since_assistant = 0
+            flush_tool_results()
             tcs = oai_tool_calls_from_assistant_msg(m)
             aa_content = assistant_blocks_from_oai(content_text, tcs)
             aa_messages.append({"role": "assistant", "content": aa_content})
@@ -280,6 +328,8 @@ async def openai_chat_completions(req: Request):
             else:
                 last_assistant_tool_use_ids = []
             continue
+
+    flush_tool_results()
 
     system_text = "\n\n".join([p for p in system_parts if p]).strip()
     system_text = enforce_diff_first(system_text)
