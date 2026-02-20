@@ -2,7 +2,7 @@ from fastapi import APIRouter, Request, Depends
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select, func
 from gateway.db import get_session, UsageRecord, Project
-from gateway.security import get_api_key
+from gateway.security import extract_gateway_api_key
 import json
 from datetime import datetime, timedelta
 
