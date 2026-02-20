@@ -3,7 +3,7 @@ from gateway.config import (
     DEFAULT_MODEL, OPUS_MODEL, ORIGIN_SECRET, REQUIRE_CF_ACCESS_HEADERS,
     UPSTREAM_TIMEOUT_SECONDS, MODEL_PREFIX,
     STRIP_IDE_BOILERPLATE, ENFORCE_DIFF_FIRST, TOOL_RESULT_MAX_CHARS,
-    SYSTEM_MAX_CHARS, USER_MSG_MAX_CHARS, ENABLE_PREFIX_CACHE, ENABLE_TOOL_RESULT_DEDUP,
+    SYSTEM_MAX_CHARS, USER_MSG_MAX_CHARS, ENABLE_ANTHROPIC_CACHE_CONTROL,
 )
 from gateway.cache import rds
 
@@ -25,8 +25,7 @@ def health():
         "tool_result_max_chars": TOOL_RESULT_MAX_CHARS,
         "system_max_chars": SYSTEM_MAX_CHARS,
         "user_msg_max_chars": USER_MSG_MAX_CHARS,
-        "enable_prefix_cache": ENABLE_PREFIX_CACHE,
-        "enable_tool_result_dedup": ENABLE_TOOL_RESULT_DEDUP,
+        "enable_anthropic_cache_control": ENABLE_ANTHROPIC_CACHE_CONTROL,
     }
 
 @router.get("/debug/origin")

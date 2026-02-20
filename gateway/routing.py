@@ -15,15 +15,28 @@ def strip_model_prefix(m: Optional[str]) -> Optional[str]:
         return None
     s = m.strip()
     low = s.lower()
-    if low.startswith("mymodel:"):
-        return s[len("MYMODEL:"):].strip()
-    if low.startswith("mymodel-"):
-        return s[len("MYMODEL-"):].strip()
+    prefix_lower = MODEL_PREFIX.lower()
+    prefix_dash = prefix_lower.rstrip(":") + "-"
+    
+    if low.startswith(prefix_lower):
+        return s[len(MODEL_PREFIX):].strip()
+    if low.startswith(prefix_dash):
+        return s[len(prefix_dash):].strip()
     return s
 
 def with_model_prefix(m: str) -> str:
     base = strip_model_prefix(m) or ""
     return f"{MODEL_PREFIX}{base}"
+
+VALID_ANTHROPIC_MODELS = {
+    "claude-sonnet-4-0",
+    "claude-opus-4-5",
+    "claude-3-5-sonnet-20241022",
+    "claude-3-opus-20240229",
+    "claude-3-sonnet-20240229",
+    "claude-3-haiku-20240307",
+}
+
 
 def map_model_alias(maybe: Optional[str]) -> Optional[str]:
     if not maybe:
@@ -37,8 +50,21 @@ def map_model_alias(maybe: Optional[str]) -> Optional[str]:
         return DEFAULT_MODEL
     if m in ("opus", "opus-4", "opus4", "claude-opus", "claude-opus-4"):
         return OPUS_MODEL
+
+    if "opus" in m:
+        return OPUS_MODEL
+    if "sonnet" in m:
+        return DEFAULT_MODEL
+
+    if m in VALID_ANTHROPIC_MODELS:
+        return m
+
     if m.startswith("claude-"):
-        return maybe
+        for valid in VALID_ANTHROPIC_MODELS:
+            if valid.startswith(m) or m.startswith(valid.split("-")[0] + "-" + valid.split("-")[1]):
+                return valid
+        return DEFAULT_MODEL
+
     return None
 
 def route_model_from_messages(user_text: str, explicit_model: Optional[str]) -> str:

@@ -6,11 +6,7 @@ from gateway.config import (
     USER_MSG_MAX_CHARS,
     SYSTEM_MAX_CHARS,
     ENFORCE_DIFF_FIRST,
-    ENABLE_PREFIX_CACHE,
-    PREFIX_CACHE_TTL_SECONDS,
-    ENABLE_TOOL_RESULT_DEDUP,
 )
-from gateway.cache import rds_get_str, rds_set_str, sha256_text
 
 _BOILERPLATE_PATTERNS: List[re.Pattern] = [
     re.compile(r"you are continue\b", re.IGNORECASE),
@@ -57,45 +53,6 @@ def strip_or_truncate(role: str, text: str, max_chars: int, allow_strip: bool) -
     meta["after"] = len(text)
     return text, meta
 
-def prefix_cache_key(system_text: str) -> str:
-    return "prefix:" + sha256_text(system_text)
-
-def maybe_prefix_cache(system_text: str) -> Tuple[str, Dict[str, Any]]:
-    meta = {"prefix_cached": False, "prefix_hit": False, "key": None}
-    if not ENABLE_PREFIX_CACHE:
-        return system_text, meta
-    if not system_text or len(system_text) < 2000:
-        return system_text, meta
-
-    key = prefix_cache_key(system_text)
-    meta["key"] = key
-    existing = rds_get_str(key)
-    if existing is not None:
-        meta["prefix_hit"] = True
-        return f"[CACHED_SYSTEM_PREFIX:{key}]", meta
-
-    rds_set_str(key, system_text, PREFIX_CACHE_TTL_SECONDS)
-    meta["prefix_cached"] = True
-    return f"[CACHED_SYSTEM_PREFIX:{key}]", meta
-
-def tool_result_dedup(tool_call_id: str, tool_text: str) -> Tuple[str, Dict[str, Any]]:
-    meta = {"tool_dedup": False, "tool_hit": False, "key": None}
-    if not ENABLE_TOOL_RESULT_DEDUP:
-        return tool_text, meta
-    if not tool_call_id or not tool_text or len(tool_text) < 2000:
-        return tool_text, meta
-
-    key = "toolres:" + sha256_text(tool_call_id + ":" + tool_text)
-    meta["key"] = key
-    existing = rds_get_str(key)
-    if existing is not None:
-        meta["tool_hit"] = True
-        return f"[CACHED_TOOL_RESULT:{key}]", meta
-
-    rds_set_str(key, tool_text, PREFIX_CACHE_TTL_SECONDS)
-    meta["tool_dedup"] = True
-    return tool_text, meta
-
 def enforce_diff_first(system_text: str) -> str:
     if not ENFORCE_DIFF_FIRST:
         return system_text
@@ -103,10 +60,8 @@ def enforce_diff_first(system_text: str) -> str:
         return system_text
     return (system_text + "\n\n" + DIFF_FIRST_RULES).strip()
 
-# exported limits for callers
 LIMITS = {
     "tool_result_max": TOOL_RESULT_MAX_CHARS,
     "user_msg_max": USER_MSG_MAX_CHARS,
     "system_max": SYSTEM_MAX_CHARS,
 }
-
