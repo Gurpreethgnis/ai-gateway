@@ -8,6 +8,22 @@
 
 ---
 
+## The Problem
+
+When you use AI-powered IDEs like **Cursor** or **Continue** with Claude:
+
+- **Massive repeated context** – The same system instructions, rules, and file contents are sent on every request. A single coding session can burn hundreds of thousands of tokens on duplicate data.
+- **No caching** – There is no layer between your client and the API. Identical prompts are billed again and again.
+- **No control over routing** – You can’t automatically use Sonnet for simple tasks and Opus for hard ones, so you either overpay or under-spec.
+- **Opaque costs** – Usage and spend are hard to track, especially across teams or projects.
+- **Vendor lock-in to the IDE** – Your API key and model choice live inside the tool; you can’t centralize auth, rate limits, or policy.
+
+The result: **high token bills** and **no way to optimize** without giving up your favorite editor.
+
+This gateway sits between your clients and Anthropic. It adds caching, token reduction, smart routing, and observability so you keep using Cursor or any OpenAI-compatible client—while cutting cost and gaining control.
+
+---
+
 ## Features
 
 - **OpenAI-Compatible API** - Drop-in replacement for OpenAI endpoints, works with Cursor, Continue, and any OpenAI SDK
