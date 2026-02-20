@@ -257,8 +257,12 @@ async def openai_chat_completions(req: Request):
                 except Exception as e:
                     log.warning("File cache processing failed: %r", e)
 
+            # If client sent an Anthropic ID (toolu_), use it directly
+            # Otherwise use index-based mapping
             use_id = tool_call_id
-            if last_assistant_tool_use_ids and tool_result_index_since_assistant < len(last_assistant_tool_use_ids):
+            if tool_call_id and tool_call_id.startswith("toolu_"):
+                use_id = tool_call_id
+            elif last_assistant_tool_use_ids and tool_result_index_since_assistant < len(last_assistant_tool_use_ids):
                 use_id = last_assistant_tool_use_ids[tool_result_index_since_assistant]
             elif tool_call_id:
                 use_id = tool_call_id
@@ -293,12 +297,18 @@ async def openai_chat_completions(req: Request):
                             )
                         elif not isinstance(part, str):
                             part = str(part) if part else ""
+                        
+                        # If client already sent an Anthropic ID (toolu_), use it directly
+                        # Otherwise use index-based mapping
                         use_id = tid
-                        if last_assistant_tool_use_ids and idx < len(last_assistant_tool_use_ids):
+                        if tid and tid.startswith("toolu_"):
+                            use_id = tid
+                        elif last_assistant_tool_use_ids and idx < len(last_assistant_tool_use_ids):
                             use_id = last_assistant_tool_use_ids[idx]
                         elif tid:
                             use_id = tid
                         idx += 1
+                        
                         if use_id:
                             tool_text, _ = strip_or_truncate("tool", part, LIMITS["tool_result_max"], allow_strip=False)
                             blocks_as_tool_results.append({
@@ -400,7 +410,7 @@ async def openai_chat_completions(req: Request):
         use_smart_routing = h.strip().lower() in ("1", "true", "yes")
     if "smart_routing" in parsed:
         use_smart_routing = bool(parsed.get("smart_routing"))
-    is_auto_model = request_model and (strip_model_prefix(request_model) or "").strip().lower() == "auto"
+    is_auto_model = request_model and (strip_model_prefix(request_model) or "").strip().lower() in ("auto", "smartroute")
     if is_auto_model:
         use_smart_routing = True
         request_model = None  # let gateway pick from content
@@ -820,7 +830,7 @@ async def openai_models(req: Request):
     payload = {
         "object": "list",
         "data": [
-            {"id": "auto", "object": "model"},
+            {"id": "smartroute", "object": "model"},
             {"id": with_model_prefix("sonnet"), "object": "model"},
             {"id": with_model_prefix("opus"), "object": "model"},
             {"id": with_model_prefix(DEFAULT_MODEL), "object": "model"},
