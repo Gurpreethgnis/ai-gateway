@@ -602,6 +602,17 @@ async def openai_chat_completions(req: Request):
                     except Exception as e:
                         if not yielded_any and attempt < max_attempts - 1 and is_retryable_error(e):
                             log.warning("STREAM Retry attempt %d/%d after error: %r", attempt + 1, max_attempts, e)
+                            
+                            # Auto-failover to Haiku if we hit concurrent connection rate limits (429)
+                            status = getattr(e, "status_code", None)
+                            if status is None:
+                                resp = getattr(e, "response", None)
+                                status = getattr(resp, "status_code", None) if resp else None
+                            
+                            if status == 429:
+                                log.warning("STREAM RateLimit hit (429), failing over to claude-3-5-haiku-20241022 for next attempt")
+                                payload["model"] = "claude-3-5-haiku-20241022"
+                            
                             time.sleep(1.0 * (2 ** attempt))
                             continue
 
