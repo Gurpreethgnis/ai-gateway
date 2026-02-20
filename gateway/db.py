@@ -167,6 +167,33 @@ async def create_tables():
         await conn.run_sync(Base.metadata.create_all)
 
 
+async def run_migrations():
+    """Manual migration to add new columns to existing tables."""
+    if engine is None:
+        return
+    
+    from sqlalchemy import text
+    async with engine.begin() as conn:
+        # Check dialect for safety
+        dialect = conn.dialect.name
+        
+        if dialect == "postgresql":
+            try:
+                await conn.execute(text("ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS cache_read_input_tokens INTEGER DEFAULT 0"))
+                await conn.execute(text("ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS cache_creation_input_tokens INTEGER DEFAULT 0"))
+                log.info("Postgres migrations applied successfully")
+            except Exception as e:
+                log.debug("Postgres migration error (might already exist): %r", e)
+        else:
+            # Generic approach for other DBs (SQLite etc)
+            try:
+                await conn.execute(text("ALTER TABLE usage_records ADD COLUMN cache_read_input_tokens INTEGER DEFAULT 0"))
+                await conn.execute(text("ALTER TABLE usage_records ADD COLUMN cache_creation_input_tokens INTEGER DEFAULT 0"))
+                log.info("Generic migrations applied successfully")
+            except Exception as e:
+                log.debug("Generic migration error: %r", e)
+
+
 @asynccontextmanager
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     if async_session_factory is None:
@@ -215,6 +242,8 @@ COST_PER_1K_TOKENS = {
     "claude-opus-4-5": {"input": 0.015, "output": 0.075},
     "claude-3-5-sonnet-20241022": {"input": 0.003, "output": 0.015},
     "claude-3-opus-20240229": {"input": 0.015, "output": 0.075},
+    "claude-3-5-haiku-20241022": {"input": 0.0008, "output": 0.004},
+    "claude-3-haiku-20240307": {"input": 0.00025, "output": 0.00125},
 }
 
 

@@ -252,7 +252,11 @@ async def get_dashboard(request: Request):
                 func.sum(UsageRecord.cost_usd)
             )
         )
-        total_input, total_cached, total_creation, total_cost = total_q.fetchone()
+        result = total_q.fetchone()
+        if result:
+            total_input, total_cached, total_creation, total_cost = result
+        else:
+            total_input, total_cached, total_creation, total_cost = 0, 0, 0, 0
         
         total_input = total_input or 0
         total_cached = total_cached or 0
