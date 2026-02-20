@@ -28,6 +28,7 @@ def with_model_prefix(m: str) -> str:
     base = strip_model_prefix(m) or ""
     return f"{MODEL_PREFIX}{base}"
 
+# Known model IDs; used for validation. New Anthropic IDs (e.g. claude-4-6-*) are passed through.
 VALID_ANTHROPIC_MODELS = {
     "claude-sonnet-4-0",
     "claude-opus-4-5",
@@ -36,6 +37,12 @@ VALID_ANTHROPIC_MODELS = {
     "claude-3-sonnet-20240229",
     "claude-3-haiku-20240307",
 }
+
+
+def _looks_like_anthropic_model_id(model: str) -> bool:
+    """True if string looks like an Anthropic model ID so we pass it through (e.g. claude-sonnet-4-6)."""
+    parts = model.split("-")
+    return len(parts) >= 3 and parts[0] == "claude"
 
 
 def map_model_alias(maybe: Optional[str]) -> Optional[str]:
@@ -51,12 +58,16 @@ def map_model_alias(maybe: Optional[str]) -> Optional[str]:
     if m in ("opus", "opus-4", "opus4", "claude-opus", "claude-opus-4"):
         return OPUS_MODEL
 
-    if "opus" in m:
+    if "opus" in m and not m.startswith("claude-"):
         return OPUS_MODEL
-    if "sonnet" in m:
+    if "sonnet" in m and not m.startswith("claude-"):
         return DEFAULT_MODEL
 
     if m in VALID_ANTHROPIC_MODELS:
+        return m
+
+    # Pass through any claude-X-Y-* style ID so new models (e.g. claude-sonnet-4-6) work without code changes
+    if _looks_like_anthropic_model_id(m):
         return m
 
     if m.startswith("claude-"):

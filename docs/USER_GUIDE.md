@@ -150,7 +150,39 @@ curl https://your-gateway.railway.app/v1/chat/completions \
   }'
 ```
 
-### Available Models
+### Choosing the model in Cursor & Continue
+
+In the model dropdown or settings, use the **model name** (no prefix required):
+
+| What you type | Gateway sends to Anthropic |
+|---------------|----------------------------|
+| `sonnet` | claude-sonnet-4-0 |
+| `opus` | claude-opus-4-5 |
+| `claude-sonnet-4-0` | claude-sonnet-4-0 |
+| `claude-opus-4-5` | claude-opus-4-5 |
+
+- You do **not** need `MODEL:Sonnet` or any prefix—just **`sonnet`** or **`claude-sonnet-4-0`**.
+- **Sonnet** is faster and cheaper; use it for most coding. **Opus** is for harder tasks (architecture, security, refactors).
+
+### Using new models (e.g. Claude 4.6)
+
+When Anthropic releases a new model (e.g. `claude-sonnet-4-6`), use the **full model ID** in your IDE:
+
+- In Cursor/Continue: set model to **`claude-sonnet-4-6`** (or whatever ID Anthropic publishes).
+- The gateway passes through any `claude-*` model ID, so new models work without a gateway update.
+
+### Changing default models (server / deployer)
+
+If you run the gateway, you can change which Claude model is used for the `sonnet` and `opus` aliases:
+
+```bash
+DEFAULT_MODEL=claude-sonnet-4-0    # Used when user picks "sonnet"
+OPUS_MODEL=claude-opus-4-5        # Used when user picks "opus"
+```
+
+Set these in Railway (or your host) environment variables. Users still choose **`sonnet`** or **`opus`** in the IDE; the gateway maps them to your configured IDs.
+
+### Available model aliases (reference)
 
 | Model Alias | Actual Model | Use Case |
 |-------------|--------------|----------|
@@ -158,8 +190,8 @@ curl https://your-gateway.railway.app/v1/chat/completions \
 | `opus` | claude-opus-4-5 | Complex architecture |
 | `claude-sonnet-4-0` | claude-sonnet-4-0 | Explicit selection |
 | `claude-opus-4-5` | claude-opus-4-5 | Explicit selection |
-| `MYMODEL:sonnet` | claude-sonnet-4-0 | Prefixed format |
-| `MYMODEL:opus` | claude-opus-4-5 | Prefixed format |
+| `MYMODEL:sonnet` | claude-sonnet-4-0 | Prefixed (if MODEL_PREFIX set) |
+| `MYMODEL:opus` | claude-opus-4-5 | Prefixed (if MODEL_PREFIX set) |
 
 ---
 

@@ -74,6 +74,16 @@ response = client.chat.completions.create(
 
 ---
 
+## Models
+
+**Use a specific model:** In Cursor or Continue, set the model to `sonnet`, `opus`, or the full ID (e.g. `claude-sonnet-4-6`). No prefix needed.
+
+**Use automatic routing (no redeploy):** In the IDE, set the model to **`auto`**. The gateway will choose Sonnet or Opus from the request. You can switch between `auto` and `sonnet`/`opus` per chat.
+
+Optional: set `ENABLE_SMART_ROUTING=1` on Railway (default) so `auto` works. To force smart routing on or off for a single request, send header `X-Gateway-Smart-Routing: 1` or `0`, or body `"smart_routing": true` or `false`.
+
+---
+
 ## Token Reduction
 
 The gateway reduces token usage through multiple layers:
@@ -181,17 +191,6 @@ Client (Cursor/Continue/SDK)
          ▼
    Anthropic Claude API
 ```
-
----
-
-## Models
-
-| Alias | Model | Best For |
-|-------|-------|----------|
-| `sonnet` | claude-sonnet-4-0 | General coding, fast responses |
-| `opus` | claude-opus-4-5 | Architecture, complex reasoning |
-
-Smart routing automatically selects Opus for complex tasks (architecture, security, migrations).
 
 ---
 

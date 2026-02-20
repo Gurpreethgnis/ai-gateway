@@ -25,7 +25,7 @@ from gateway.config import (
     DATABASE_URL,
 )
 from gateway.logging_setup import log
-from gateway.routing import route_model_from_messages, with_model_prefix
+from gateway.routing import route_model_from_messages, with_model_prefix, strip_model_prefix
 from gateway.cache import cache_key, cache_get, cache_set
 from gateway.anthropic_client import (
     client,
@@ -283,7 +283,20 @@ async def openai_chat_completions(req: Request):
     joined_user = "\n".join(user_join)
 
     request_model = parsed.get("model")
-    if ENABLE_SMART_ROUTING:
+
+    # Per-request smart routing: header, body, or model "auto" (no redeploy needed)
+    use_smart_routing = ENABLE_SMART_ROUTING
+    h = req.headers.get("x-gateway-smart-routing")
+    if h is not None:
+        use_smart_routing = h.strip().lower() in ("1", "true", "yes")
+    if "smart_routing" in parsed:
+        use_smart_routing = bool(parsed.get("smart_routing"))
+    is_auto_model = request_model and (strip_model_prefix(request_model) or "").strip().lower() == "auto"
+    if is_auto_model:
+        use_smart_routing = True
+        request_model = None  # let gateway pick from content
+
+    if use_smart_routing:
         try:
             from gateway.smart_routing import route_model
             model = await route_model(aa_messages, aa_tools, project_id, request_model)
@@ -698,6 +711,7 @@ async def openai_models(req: Request):
     payload = {
         "object": "list",
         "data": [
+            {"id": "auto", "object": "model"},
             {"id": with_model_prefix("sonnet"), "object": "model"},
             {"id": with_model_prefix("opus"), "object": "model"},
             {"id": with_model_prefix(DEFAULT_MODEL), "object": "model"},
@@ -709,7 +723,7 @@ async def openai_models(req: Request):
         ],
     }
     resp = JSONResponse(content=payload)
-    resp.headers["X-Gateway"] = "gursimanoor-gateway"
+    resp.headers["X-Gateway"] = "claude-gateway"
     resp.headers["X-Model-Source"] = "custom"
     return resp
 
