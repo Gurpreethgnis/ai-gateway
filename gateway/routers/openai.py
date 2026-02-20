@@ -215,10 +215,10 @@ async def openai_chat_completions(req: Request):
     pending_tool_result_blocks: List[Dict[str, Any]] = []
 
     def flush_tool_results():
-        nonlocal tool_result_index_since_assistant
+        nonlocal tool_result_index_since_assistant, pending_tool_result_blocks
         if pending_tool_result_blocks:
-            aa_messages.append({"role": "user", "content": pending_tool_result_blocks})
-            pending_tool_result_blocks.clear()
+            aa_messages.append({"role": "user", "content": list(pending_tool_result_blocks)})
+            pending_tool_result_blocks = []
         tool_result_index_since_assistant = 0
 
     messages_list = parsed.get("messages", [])
@@ -315,7 +315,7 @@ async def openai_chat_completions(req: Request):
             new_text, _meta = strip_or_truncate("user", content_text, LIMITS["user_msg_max"], allow_strip=False)
             if new_text:
                 user_join.append(new_text)
-            aa_messages.append({"role": "user", "content": new_text})
+                aa_messages.append({"role": "user", "content": new_text})
             continue
 
         if role == "assistant":
