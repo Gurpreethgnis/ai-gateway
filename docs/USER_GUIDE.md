@@ -31,16 +31,18 @@ A complete guide for setting up, configuring, and using the AI Gateway across pr
 
 ### Your Gateway Details
 
+After deployment, note your gateway URL:
+
 ```
-Gateway URL: https://cursor.gursimanoor.com
-Health Check: https://cursor.gursimanoor.com/health
+Gateway URL: https://your-gateway.railway.app
+Health Check: https://your-gateway.railway.app/health
 ```
 
 ### Verify It's Working
 
 ```bash
 # Check health (use your API key)
-curl https://cursor.gursimanoor.com/health \
+curl https://your-gateway.railway.app/health \
   -H "Authorization: Bearer YOUR_GATEWAY_API_KEY"
 
 # Expected: {"ok":true,"redis":true,...}
@@ -57,7 +59,7 @@ curl https://cursor.gursimanoor.com/health \
 
 ```json
 {
-  "openai.baseUrl": "https://cursor.gursimanoor.com/v1",
+  "openai.baseUrl": "https://your-gateway.railway.app/v1",
   "openai.apiKey": "YOUR_GATEWAY_API_KEY"
 }
 ```
@@ -66,7 +68,7 @@ Or via UI:
 1. Settings → Models → OpenAI API Key
 2. Enter your gateway API key
 3. Settings → Models → Override OpenAI Base URL
-4. Enter: `https://cursor.gursimanoor.com/v1`
+4. Enter: `https://your-gateway.railway.app/v1`
 
 ### Continue Extension
 
@@ -79,14 +81,14 @@ Edit `~/.continue/config.json`:
       "title": "Claude via Gateway",
       "provider": "openai",
       "model": "claude-sonnet-4-0",
-      "apiBase": "https://cursor.gursimanoor.com/v1",
+      "apiBase": "https://your-gateway.railway.app/v1",
       "apiKey": "YOUR_GATEWAY_API_KEY"
     },
     {
       "title": "Claude Opus via Gateway",
       "provider": "openai", 
       "model": "claude-opus-4-5",
-      "apiBase": "https://cursor.gursimanoor.com/v1",
+      "apiBase": "https://your-gateway.railway.app/v1",
       "apiKey": "YOUR_GATEWAY_API_KEY"
     }
   ]
@@ -99,7 +101,7 @@ Edit `~/.continue/config.json`:
 import OpenAI from 'openai';
 
 const client = new OpenAI({
-  baseURL: 'https://cursor.gursimanoor.com/v1',
+  baseURL: 'https://your-gateway.railway.app/v1',
   apiKey: 'YOUR_GATEWAY_API_KEY',
 });
 
@@ -120,7 +122,7 @@ for await (const chunk of response) {
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="https://cursor.gursimanoor.com/v1",
+    base_url="https://your-gateway.railway.app/v1",
     api_key="YOUR_GATEWAY_API_KEY",
 )
 
@@ -138,7 +140,7 @@ for chunk in response:
 ### cURL
 
 ```bash
-curl https://cursor.gursimanoor.com/v1/chat/completions \
+curl https://your-gateway.railway.app/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_GATEWAY_API_KEY" \
   -d '{
@@ -200,7 +202,7 @@ Check response headers:
 
 ```bash
 # First request - should be MISS
-curl -I https://cursor.gursimanoor.com/v1/chat/completions \
+curl -I https://your-gateway.railway.app/v1/chat/completions \
   -H "Authorization: Bearer YOUR_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model":"sonnet","messages":[{"role":"user","content":"Say hello"}]}'
@@ -270,7 +272,7 @@ DATABASE_URL=postgresql+asyncpg://user:pass@host/db
 ADMIN_KEY="your-admin-api-key"
 
 # Create a new project
-curl -X POST https://cursor.gursimanoor.com/admin/projects \
+curl -X POST https://your-gateway.railway.app/admin/projects \
   -H "X-API-Key: $ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -289,14 +291,14 @@ curl -X POST https://cursor.gursimanoor.com/admin/projects \
 ### List Projects
 
 ```bash
-curl https://cursor.gursimanoor.com/admin/projects \
+curl https://your-gateway.railway.app/admin/projects \
   -H "X-API-Key: $ADMIN_KEY"
 ```
 
 ### Update Project
 
 ```bash
-curl -X PUT https://cursor.gursimanoor.com/admin/projects/1 \
+curl -X PUT https://your-gateway.railway.app/admin/projects/1 \
   -H "X-API-Key: $ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -310,7 +312,7 @@ curl -X PUT https://cursor.gursimanoor.com/admin/projects/1 \
 ### Delete Project
 
 ```bash
-curl -X DELETE https://cursor.gursimanoor.com/admin/projects/1 \
+curl -X DELETE https://your-gateway.railway.app/admin/projects/1 \
   -H "X-API-Key: $ADMIN_KEY"
 ```
 
@@ -423,7 +425,7 @@ Create a secure backup of these credentials:
 ┌─────────────────────────────────────────────┐
 │           SAVE THESE SECURELY               │
 ├─────────────────────────────────────────────┤
-│ Gateway URL:     https://cursor.gursimanoor.com │
+│ Gateway URL:     https://your-gateway.railway.app │
 │ Gateway API Key: YOUR_GATEWAY_API_KEY       │
 │ Admin API Key:   YOUR_ADMIN_API_KEY         │
 └─────────────────────────────────────────────┘
@@ -448,12 +450,12 @@ Add to your shell profile (`~/.bashrc`, `~/.zshrc`, or PowerShell profile):
 ```bash
 # Bash/Zsh
 export GW_KEY="your-gateway-api-key"
-export GW_URL="https://cursor.gursimanoor.com"
+export GW_URL="https://your-gateway.railway.app"
 export ADMIN_KEY="your-admin-api-key"
 
 # PowerShell (add to $PROFILE)
 $env:GW_KEY = "your-gateway-api-key"
-$env:GW_URL = "https://cursor.gursimanoor.com"
+$env:GW_URL = "https://your-gateway.railway.app"
 $env:ADMIN_KEY = "your-admin-api-key"
 ```
 
@@ -463,7 +465,7 @@ Settings JSON:
 
 ```json
 {
-  "openai.baseUrl": "https://cursor.gursimanoor.com/v1",
+  "openai.baseUrl": "https://your-gateway.railway.app/v1",
   "openai.apiKey": "YOUR_GATEWAY_API_KEY"
 }
 ```
@@ -489,7 +491,7 @@ Save this as `setup-gateway.sh`:
 #!/bin/bash
 
 # AI Gateway Quick Setup
-GW_URL="https://cursor.gursimanoor.com"
+GW_URL="https://your-gateway.railway.app"
 
 echo "Testing gateway connection..."
 curl -s "$GW_URL/health" -H "Authorization: Bearer $1" | python3 -m json.tool
@@ -683,8 +685,8 @@ CONTEXT_MAX_TOKENS=80000
 ┌─────────────────────────────────────────────────────────────┐
 │                    AI GATEWAY QUICK REF                     │
 ├─────────────────────────────────────────────────────────────┤
-│ Gateway URL:    https://cursor.gursimanoor.com              │
-│ API Endpoint:   https://cursor.gursimanoor.com/v1           │
+│ Gateway URL:    https://your-gateway.railway.app              │
+│ API Endpoint:   https://your-gateway.railway.app/v1           │
 │                                                             │
 │ ENDPOINTS:                                                  │
 │   POST /v1/chat/completions  - Chat (OpenAI compatible)     │
@@ -705,7 +707,7 @@ CONTEXT_MAX_TOKENS=80000
 │ RESPONSE HEADERS:                                           │
 │   X-Cache: HIT/MISS          - Cache status                 │
 │   X-RateLimit-Remaining: N   - Requests left                │
-│   X-Gateway: gursimanoor     - Confirms gateway used        │
+│   X-Gateway: claude-gateway  - Confirms gateway used        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -714,5 +716,5 @@ CONTEXT_MAX_TOKENS=80000
 ## Support
 
 - **Repository**: https://github.com/Gurpreethgnis/ai-gateway
-- **Health Check**: https://cursor.gursimanoor.com/health
+- **Health Check**: https://your-gateway.railway.app/health
 - **Railway Dashboard**: https://railway.app (check deployment logs)

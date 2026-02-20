@@ -345,7 +345,7 @@ async def openai_chat_completions(req: Request):
             record_request(model, project_name or "default", 200, "/v1/chat/completions", dt_ms / 1000.0, cached=True)
 
             response = JSONResponse(content=resp_json)
-            response.headers["X-Gateway"] = "gursimanoor-gateway"
+            response.headers["X-Gateway"] = "claude-gateway"
             response.headers["X-Model-Source"] = "custom"
             response.headers["X-Cache"] = "HIT"
             response.headers["X-Reduction"] = "1"
@@ -534,7 +534,7 @@ async def openai_chat_completions(req: Request):
         response.headers["Cache-Control"] = "no-cache"
         response.headers["Connection"] = "keep-alive"
         response.headers["X-Accel-Buffering"] = "no"
-        response.headers["X-Gateway"] = "gursimanoor-gateway"
+        response.headers["X-Gateway"] = "claude-gateway"
         response.headers["X-Model-Source"] = "custom"
         response.headers["X-Cache"] = "MISS"
         response.headers["X-Reduction"] = "1"
@@ -677,7 +677,7 @@ async def openai_chat_completions(req: Request):
     }
 
     response = JSONResponse(content=resp_json)
-    response.headers["X-Gateway"] = "gursimanoor-gateway"
+    response.headers["X-Gateway"] = "claude-gateway"
     response.headers["X-Model-Source"] = "custom"
     response.headers["X-Cache"] = "MISS"
     response.headers["X-Reduction"] = "1"
