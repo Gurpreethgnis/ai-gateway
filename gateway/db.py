@@ -39,6 +39,8 @@ class UsageRecord(Base):
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     model: Mapped[str] = mapped_column(String(100), nullable=False)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_read_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_creation_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     cached: Mapped[bool] = mapped_column(default=False)
@@ -176,6 +178,32 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
         except Exception:
             await session.rollback()
             raise
+
+
+async def record_usage_to_db(
+    project_id: Optional[int],
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cf_ray: str,
+    cached: bool,
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+):
+    cost = calculate_cost(model, input_tokens, output_tokens)
+    async with get_session() as session:
+        record = UsageRecord(
+            project_id=project_id,
+            model=model,
+            input_tokens=input_tokens,
+            cache_read_input_tokens=cache_read_input_tokens,
+            cache_creation_input_tokens=cache_creation_input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost,
+            cached=cached,
+            cf_ray=cf_ray,
+        )
+        session.add(record)
 
 
 def hash_api_key(api_key: str) -> str:

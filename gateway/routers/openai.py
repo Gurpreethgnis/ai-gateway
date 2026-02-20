@@ -728,7 +728,9 @@ async def openai_chat_completions(req: Request):
                             project_id, model,
                             final_usage.get("input_tokens", 0),
                             final_usage.get("output_tokens", 0),
-                            ray, False
+                            ray, False,
+                            cache_read_input_tokens=final_usage.get("cache_read_input_tokens", 0),
+                            cache_creation_input_tokens=final_usage.get("cache_creation_input_tokens", 0)
                         )
 
                     finished = True
@@ -857,7 +859,15 @@ async def openai_chat_completions(req: Request):
         stream=False,
     )
 
-    await record_usage_to_db(project_id, model, input_tokens, output_tokens, ray, False)
+    await record_usage_to_db(
+        project_id, model, 
+        input_tokens, 
+        output_tokens, 
+        ray, 
+        False,
+        cache_read_input_tokens=usage.get("cache_read_input_tokens", 0) if usage else 0,
+        cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0) if usage else 0
+    )
 
     if ENABLE_MEMORY_LAYER and project_id and out_text and len(out_text) > 200:
         try:
