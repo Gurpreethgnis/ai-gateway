@@ -66,16 +66,29 @@ def extract_usage(resp) -> Optional[Dict[str, Any]]:
         return None
 
 
-def anthropic_to_openai_usage(usage: Optional[Dict[str, Any]]) -> Optional[Dict[str, int]]:
+def anthropic_to_openai_usage(usage: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not usage:
         return None
     try:
-        prompt = int(usage.get("input_tokens", 0) or 0)
+        # Anthropic 'input_tokens' only counts the *un-cached* mapped tokens.
+        # So we want total prompt tokens to be billed + cached to match OpenAI's total input expectation.
+        billed_prompt = int(usage.get("input_tokens", 0) or 0)
+        cache_creation = int(usage.get("cache_creation_input_tokens", 0) or 0)
+        cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
+        
+        total_prompt = billed_prompt + cache_creation + cache_read
         completion = int(usage.get("output_tokens", 0) or 0)
+        
         return {
-            "prompt_tokens": prompt,
+            "prompt_tokens": total_prompt,
             "completion_tokens": completion,
-            "total_tokens": prompt + completion,
+            "total_tokens": total_prompt + completion,
+            "prompt_tokens_details": {
+                "cached_tokens": cache_read
+            },
+            # Map native Anthropic fields too just so client can see them
+            "cache_creation_input_tokens": cache_creation,
+            "cache_read_input_tokens": cache_read,
         }
     except Exception:
         return None
