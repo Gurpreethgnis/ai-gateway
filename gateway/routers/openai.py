@@ -541,10 +541,13 @@ async def openai_chat_completions(req: Request):
                 import time
                 from gateway.retry import is_retryable_error
                 from gateway.anthropic_client import log_anthropic_error
+                from gateway.concurrency import acquire_concurrency_slot, release_concurrency_slot
                 max_attempts = 3
 
                 for attempt in range(max_attempts):
                     yielded_any = False
+                    
+                    req_id = acquire_concurrency_slot(payload["model"])
                     try:
                         with client.messages.stream(**payload) as stream:
                             for ev in stream:
@@ -612,6 +615,7 @@ async def openai_chat_completions(req: Request):
                             if status == 429:
                                 log.warning("STREAM RateLimit hit (429), failing over to claude-3-5-haiku-20241022 for next attempt")
                                 payload["model"] = "claude-3-5-haiku-20241022"
+                                # Note: the new model will grab a different queue pool slot on next attempt
                             
                             time.sleep(1.0 * (2 ** attempt))
                             continue
@@ -630,6 +634,9 @@ async def openai_chat_completions(req: Request):
                                 pass
                         asyncio.run_coroutine_threadsafe(q.put(("error", err_msg)), loop)
                         break
+                    
+                    finally:
+                        release_concurrency_slot(payload["model"], req_id)
 
             loop.run_in_executor(None, _worker_stream)
 
