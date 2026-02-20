@@ -25,7 +25,7 @@ from gateway.config import (
     DATABASE_URL,
 )
 from gateway.logging_setup import log
-from gateway.routing import route_model_from_messages, with_model_prefix, strip_model_prefix
+from gateway.routing import route_model_from_messages, with_model_prefix, strip_model_prefix, VALID_ANTHROPIC_MODELS
 from gateway.cache import cache_key, cache_get, cache_set
 from gateway.anthropic_client import (
     client,
@@ -321,6 +321,41 @@ async def openai_chat_completions(req: Request):
                         aa_messages.append({"role": "user", "content": blocks_as_tool_results})
                         tool_result_index_since_assistant = 0
                         continue
+                else:
+                    is_mixed = any(b.get("type") in ("text", "image_url") for b in raw_content)
+                    if is_mixed:
+                        flush_tool_results()
+                        anthropic_content = []
+                        text_parts = []
+                        for b in raw_content:
+                            if b.get("type") == "text":
+                                t = b.get("text") or ""
+                                anthropic_content.append({"type": "text", "text": t})
+                                text_parts.append(t)
+                            elif b.get("type") == "image_url":
+                                iu_obj = b.get("image_url") or {}
+                                url = iu_obj.get("url") or ""
+                                if url.startswith("data:"):
+                                    try:
+                                        header, b64 = url.split(",", 1)
+                                        media_type = header.replace("data:", "").split(";")[0]
+                                        anthropic_content.append({
+                                            "type": "image",
+                                            "source": {
+                                                "type": "base64",
+                                                "media_type": media_type,
+                                                "data": b64
+                                            }
+                                        })
+                                        text_parts.append("[Image attached]")
+                                    except Exception:
+                                        pass
+                                else:
+                                    text_parts.append(f"[Image URL: {url}]")
+                        if anthropic_content:
+                            user_join.append("\n".join(text_parts))
+                            aa_messages.append({"role": "user", "content": anthropic_content})
+                            continue
             flush_tool_results()
             new_text, _meta = strip_or_truncate("user", content_text, LIMITS["user_msg_max"], allow_strip=False)
             if new_text:
@@ -623,12 +658,13 @@ async def openai_chat_completions(req: Request):
 
                 if kind == "done":
                     final_usage = payload_item
+                    finish_reason = "stop" if current_tool_call_idx < 0 else "tool_calls"
                     final_chunk = {
                         "id": chunk_id,
                         "object": "chat.completion.chunk",
                         "created": created,
                         "model": with_model_prefix(model),
-                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
                     }
                     if include_usage and payload_item:
                         final_chunk["usage"] = anthropic_to_openai_usage(payload_item)
@@ -827,19 +863,32 @@ async def openai_models(req: Request):
     ua = req.headers.get("user-agent") or ""
     log.info("MODELS HIT cf-ray=%s ua=%s", ray, ua[:120])
 
+    base_models = [
+        {"id": "smartroute", "object": "model"},
+        {"id": with_model_prefix("sonnet"), "object": "model"},
+        {"id": with_model_prefix("opus"), "object": "model"},
+        {"id": with_model_prefix(DEFAULT_MODEL), "object": "model"},
+        {"id": with_model_prefix(OPUS_MODEL), "object": "model"},
+        {"id": "sonnet", "object": "model"},
+        {"id": "opus", "object": "model"},
+        {"id": DEFAULT_MODEL, "object": "model"},
+        {"id": OPUS_MODEL, "object": "model"},
+    ]
+
+    for m in VALID_ANTHROPIC_MODELS:
+        base_models.append({"id": m, "object": "model"})
+        base_models.append({"id": with_model_prefix(m), "object": "model"})
+
+    seen = set()
+    data = []
+    for item in base_models:
+        if item["id"] not in seen:
+            seen.add(item["id"])
+            data.append(item)
+
     payload = {
         "object": "list",
-        "data": [
-            {"id": "smartroute", "object": "model"},
-            {"id": with_model_prefix("sonnet"), "object": "model"},
-            {"id": with_model_prefix("opus"), "object": "model"},
-            {"id": with_model_prefix(DEFAULT_MODEL), "object": "model"},
-            {"id": with_model_prefix(OPUS_MODEL), "object": "model"},
-            {"id": "sonnet", "object": "model"},
-            {"id": "opus", "object": "model"},
-            {"id": DEFAULT_MODEL, "object": "model"},
-            {"id": OPUS_MODEL, "object": "model"},
-        ],
+        "data": data,
     }
     resp = JSONResponse(content=payload)
     resp.headers["X-Gateway"] = "claude-gateway"

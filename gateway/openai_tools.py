@@ -84,6 +84,8 @@ def anthropic_tool_result_block(tool_call_id: str, tool_text: str) -> List[Dict[
 
 # ---- Pydantic extras safe getters ----
 def get_extra(m: Any, key: str, default=None):
+    if isinstance(m, dict):
+        return m.get(key, default)
     if hasattr(m, key):
         v = getattr(m, key)
         if v is not None:
