@@ -331,6 +331,50 @@ async def openai_chat_completions(req: Request):
 
     flush_tool_results()
 
+    # Normalize messages: filter empty, ensure first is user, merge consecutive same-role
+    def normalize_messages(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        # Filter out empty content
+        filtered = []
+        for msg in msgs:
+            c = msg.get("content")
+            if c is None:
+                continue
+            if isinstance(c, str) and not c.strip():
+                continue
+            if isinstance(c, list) and len(c) == 0:
+                continue
+            filtered.append(msg)
+        
+        if not filtered:
+            return []
+        
+        # Ensure first message is user
+        if filtered[0].get("role") != "user":
+            filtered.insert(0, {"role": "user", "content": "(conversation continues)"})
+        
+        # Merge consecutive same-role messages
+        merged = []
+        for msg in filtered:
+            if merged and merged[-1].get("role") == msg.get("role"):
+                prev_content = merged[-1].get("content")
+                curr_content = msg.get("content")
+                if isinstance(prev_content, str) and isinstance(curr_content, str):
+                    merged[-1]["content"] = prev_content + "\n\n" + curr_content
+                elif isinstance(prev_content, list) and isinstance(curr_content, list):
+                    merged[-1]["content"] = prev_content + curr_content
+                elif isinstance(prev_content, str) and isinstance(curr_content, list):
+                    merged[-1]["content"] = [{"type": "text", "text": prev_content}] + curr_content
+                elif isinstance(prev_content, list) and isinstance(curr_content, str):
+                    merged[-1]["content"] = prev_content + [{"type": "text", "text": curr_content}]
+                else:
+                    merged.append(msg)
+            else:
+                merged.append(msg)
+        
+        return merged
+
+    aa_messages = normalize_messages(aa_messages)
+
     system_text = "\n\n".join([p for p in system_parts if p]).strip()
     system_text = enforce_diff_first(system_text)
     system_text, _ = strip_or_truncate("system", system_text, LIMITS["system_max"], allow_strip=False)
