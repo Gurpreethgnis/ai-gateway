@@ -1,24 +1,4 @@
-Perfect. If you're going public, it needs to look serious, production-grade, and deliberate — not like a side project.
-
-Below is a **launch-ready, polished, open-source README** with:
-
-* Badges
-* Architecture diagram
-* Clear positioning
-* Security section
-* Tool-calling explanation
-* Token reduction explanation
-* Deployment instructions
-* Roadmap
-* ✅ Completed checklist
-* 🔧 Remaining work checklist
-* Clear value proposition
-
-You can paste this directly into `README.md`.
-
----
-
-# Claude Gateway
+# Coding Gateway
 
 ### OpenAI-Compatible Claude Infrastructure Layer
 
