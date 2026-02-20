@@ -1,6 +1,7 @@
 import asyncio
 from typing import Dict, Any, Optional
-
+import json
+import traceback
 from fastapi import HTTPException
 from anthropic import Anthropic
 
@@ -45,3 +46,43 @@ def anthropic_to_openai_usage(usage: Optional[Dict[str, Any]]) -> Optional[Dict[
         return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}
     except Exception:
         return None
+
+def log_anthropic_error(prefix: str, payload: Dict[str, Any], err: Exception):
+    try:
+        log.error("%s: %r", prefix, err)
+
+        resp = getattr(err, "response", None)
+        if resp is not None:
+            try:
+                j = resp.json()
+                log.error("%s response.json: %s", prefix, json.dumps(j, ensure_ascii=False)[:8000])
+            except Exception:
+                try:
+                    txt = getattr(resp, "text", "")
+                    log.error("%s response.text: %s", prefix, (txt or "")[:8000])
+                except Exception:
+                    pass
+
+        # ultra-compact payload summary: roles + tool ids
+        msgs = payload.get("messages") or []
+        summary = []
+        for m in msgs[-12:]:
+            role = m.get("role")
+            c = m.get("content")
+            item = {"role": role}
+
+            if isinstance(c, list):
+                item["blocks"] = []
+                for b in c:
+                    if isinstance(b, dict) and b.get("type") in ("tool_use", "tool_result"):
+                        if b["type"] == "tool_use":
+                            item["blocks"].append({"tool_use": b.get("id"), "name": b.get("name")})
+                        else:
+                            item["blocks"].append({"tool_result": b.get("tool_use_id")})
+            summary.append(item)
+
+        log.error("%s payload_summary: %s", prefix, json.dumps(summary, ensure_ascii=False))
+        log.error("%s traceback:\n%s", prefix, traceback.format_exc())
+    except Exception:
+        pass
+
