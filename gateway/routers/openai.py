@@ -210,6 +210,8 @@ async def openai_chat_completions(req: Request):
     system_parts: List[str] = []
     aa_messages: List[Dict[str, Any]] = []
     user_join: List[str] = []
+    last_assistant_tool_use_ids: List[str] = []
+    tool_result_index_since_assistant: int = 0
 
     messages_list = parsed.get("messages", [])
     for m in messages_list:
@@ -247,13 +249,21 @@ async def openai_chat_completions(req: Request):
                 except Exception as e:
                     log.warning("File cache processing failed: %r", e)
 
-            if tool_call_id:
-                aa_messages.append({"role": "user", "content": anthropic_tool_result_block(tool_call_id, tool_text)})
+            use_id = tool_call_id
+            if last_assistant_tool_use_ids and tool_result_index_since_assistant < len(last_assistant_tool_use_ids):
+                use_id = last_assistant_tool_use_ids[tool_result_index_since_assistant]
+            elif tool_call_id:
+                use_id = tool_call_id
+            tool_result_index_since_assistant += 1
+
+            if use_id:
+                aa_messages.append({"role": "user", "content": anthropic_tool_result_block(use_id, tool_text)})
             else:
                 aa_messages.append({"role": "user", "content": tool_text})
             continue
 
         if role == "user":
+            tool_result_index_since_assistant = 0
             new_text, _meta = strip_or_truncate("user", content_text, LIMITS["user_msg_max"], allow_strip=False)
             if new_text:
                 user_join.append(new_text)
@@ -261,9 +271,14 @@ async def openai_chat_completions(req: Request):
             continue
 
         if role == "assistant":
+            tool_result_index_since_assistant = 0
             tcs = oai_tool_calls_from_assistant_msg(m)
             aa_content = assistant_blocks_from_oai(content_text, tcs)
             aa_messages.append({"role": "assistant", "content": aa_content})
+            if isinstance(aa_content, list):
+                last_assistant_tool_use_ids = [b.get("id") or "" for b in aa_content if isinstance(b, dict) and b.get("type") == "tool_use"]
+            else:
+                last_assistant_tool_use_ids = []
             continue
 
     system_text = "\n\n".join([p for p in system_parts if p]).strip()
