@@ -11,6 +11,11 @@ from gateway.logging_setup import log
 client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
 async def call_anthropic_with_timeout(payload: Dict[str, Any]):
+    """
+    Anthropic SDK call is synchronous.
+    Run it in a thread + enforce timeout.
+    Log full error details if Anthropic returns 4xx/5xx.
+    """
     if client is None:
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set")
 
@@ -19,8 +24,72 @@ async def call_anthropic_with_timeout(payload: Dict[str, Any]):
 
     try:
         return await asyncio.wait_for(_run(), timeout=UPSTREAM_TIMEOUT_SECONDS)
+
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Upstream model timed out")
+
+    except Exception as e:
+        # ===== FULL ERROR LOGGING =====
+        try:
+            log.error("ANTHROPIC create failed: %r", e)
+
+            # Try to extract response body from SDK error
+            resp = getattr(e, "response", None)
+            if resp is not None:
+                try:
+                    j = resp.json()
+                    log.error("ANTHROPIC response.json: %s", json.dumps(j, ensure_ascii=False)[:8000])
+                except Exception:
+                    try:
+                        txt = getattr(resp, "text", "")
+                        log.error("ANTHROPIC response.text: %s", (txt or "")[:8000])
+                    except Exception:
+                        pass
+
+            # Compact payload summary (so we can see tool IDs + structure)
+            msgs = payload.get("messages") or []
+            summary = []
+            for m in msgs[-12:]:
+                role = m.get("role")
+                content = m.get("content")
+                item = {"role": role}
+
+                if isinstance(content, list):
+                    item["blocks"] = []
+                    for b in content:
+                        if isinstance(b, dict):
+                            t = b.get("type")
+                            if t == "tool_use":
+                                item["blocks"].append({
+                                    "tool_use_id": b.get("id"),
+                                    "name": b.get("name")
+                                })
+                            elif t == "tool_result":
+                                item["blocks"].append({
+                                    "tool_result_for": b.get("tool_use_id")
+                                })
+                            elif t == "text":
+                                item["blocks"].append({
+                                    "text_len": len(b.get("text") or "")
+                                })
+                summary.append(item)
+
+            log.error("ANTHROPIC payload summary: %s",
+                      json.dumps({
+                          "model": payload.get("model"),
+                          "has_tools": bool(payload.get("tools")),
+                          "tool_choice": payload.get("tool_choice"),
+                          "system_len": len(payload.get("system") or ""),
+                          "messages": summary
+                      }, ensure_ascii=False)[:8000])
+
+        except Exception:
+            # Never crash during logging
+            pass
+
+        # Re-raise so existing handler returns 502
+        raise
+
 
 def extract_text_from_anthropic(resp) -> str:
     return "".join(
