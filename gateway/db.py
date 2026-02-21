@@ -41,6 +41,7 @@ class UsageRecord(Base):
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cache_read_input_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
     cache_creation_input_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    gateway_tokens_saved: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     cached: Mapped[bool] = mapped_column(default=False)
@@ -180,6 +181,10 @@ async def create_tables():
             await conn.execute(text("ALTER TABLE usage_records ALTER COLUMN cache_creation_input_tokens DROP NOT NULL"))
         except Exception:
             pass  # column may not exist or already nullable
+        try:
+            await conn.execute(text("ALTER TABLE usage_records ALTER COLUMN gateway_tokens_saved DROP NOT NULL"))
+        except Exception:
+            pass  # column may not exist or already nullable
 
 
 @asynccontextmanager
@@ -208,6 +213,7 @@ async def record_usage_to_db(
     cached: bool,
     cache_read_input_tokens: int = 0,
     cache_creation_input_tokens: int = 0,
+    gateway_tokens_saved: int = 0,
 ):
     if not DATABASE_URL:
         return
@@ -221,6 +227,7 @@ async def record_usage_to_db(
                 input_tokens=input_tokens,
                 cache_read_input_tokens=cache_read_input_tokens,
                 cache_creation_input_tokens=cache_creation_input_tokens,
+                gateway_tokens_saved=gateway_tokens_saved,
                 output_tokens=output_tokens,
                 cost_usd=cost,
                 cached=cached,

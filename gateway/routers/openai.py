@@ -440,11 +440,13 @@ async def openai_chat_completions(req: Request):
     max_tokens = int(parsed.get("max_tokens") or DEFAULT_MAX_TOKENS)
     temperature = parsed.get("temperature") if parsed.get("temperature") is not None else 0.2
 
+    gateway_tokens_saved = 0
     if ENABLE_CONTEXT_PRUNING:
         try:
             from gateway.context_pruner import prune_context
             aa_messages, prune_meta = await prune_context(aa_messages, system_text=system_text)
             if prune_meta.get("pruned"):
+                gateway_tokens_saved += prune_meta.get("tokens_saved", 0)
                 log.debug("Context pruned: %s", prune_meta)
         except Exception as e:
             log.warning("Context pruning failed: %r", e)
@@ -766,7 +768,8 @@ async def openai_chat_completions(req: Request):
                             final_usage.get("output_tokens", 0),
                             ray, False,
                             final_usage.get("cache_read_input_tokens", 0),
-                            final_usage.get("cache_creation_input_tokens", 0)
+                            final_usage.get("cache_creation_input_tokens", 0),
+                            gateway_tokens_saved
                         )
 
                     finished = True
@@ -918,7 +921,8 @@ async def openai_chat_completions(req: Request):
     await record_usage_to_db(
         project_id, model, input_tokens, output_tokens, ray, False,
         usage.get("cache_read_input_tokens", 0) if usage else 0,
-        usage.get("cache_creation_input_tokens", 0) if usage else 0
+        usage.get("cache_creation_input_tokens", 0) if usage else 0,
+        gateway_tokens_saved
     )
 
     if ENABLE_MEMORY_LAYER and project_id and out_text and len(out_text) > 200:

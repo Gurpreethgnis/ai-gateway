@@ -204,25 +204,25 @@ DASHBOARD_HTML = """
 
         <h2 style="margin-bottom: 1.5rem; font-size: 1.25rem;">Token Savings Breakdown</h2>
         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem;">
-            <div class="card">
-                <span class="card-label">Anthropic Cache</span>
-                <div class="card-value">{{ total_cached:,}} tokens</div>
-                <div class="card-sub">Cached by Anthropic</div>
+            <div class="card" style="border-left: 4px solid #10b981;">
+                <span class="card-label">🤖 Anthropic Cache</span>
+                <div class="card-value">{{ total_cached }} tokens</div>
+                <div class="card-sub" style="color: #10b981;">Cached by Anthropic</div>
             </div>
-            <div class="card">
-                <span class="card-label">Context Pruning</span>
-                <div class="card-value">Enabled</div>
-                <div class="card-sub">Removes old messages</div>
+            <div class="card" style="border-left: 4px solid #3b82f6;">
+                <span class="card-label">⚡ Gateway Savings</span>
+                <div class="card-value">{{ total_gateway_saved }} tokens</div>
+                <div class="card-sub" style="color: #3b82f6;">Pruning + Stripping</div>
             </div>
-            <div class="card">
-                <span class="card-label">Boilerplate Strip</span>
-                <div class="card-value">Enabled</div>
-                <div class="card-sub">Removes IDE noise</div>
+            <div class="card" style="border-left: 4px solid #8b5cf6;">
+                <span class="card-label">📊 Total Efficiency</span>
+                <div class="card-value">{{ efficiency }}</div>
+                <div class="card-sub" style="color: #8b5cf6;">Combined savings</div>
             </div>
-            <div class="card">
-                <span class="card-label">Content Limits</span>
-                <div class="card-value">20K/60K</div>
-                <div class="card-sub">Tool/User msg limits</div>
+            <div class="card" style="border-left: 4px solid #f59e0b;">
+                <span class="card-label">💰 Cost Saved</span>
+                <div class="card-value">{{ savings_usd }}</div>
+                <div class="card-sub" style="color: #f59e0b;">Estimated USD</div>
             </div>
         </div>
 
@@ -236,6 +236,7 @@ DASHBOARD_HTML = """
                         <th>Status</th>
                         <th>Input</th>
                         <th>Cached</th>
+                        <th>Gateway</th>
                         <th>Output</th>
                         <th>Savings</th>
                     </tr>
@@ -332,12 +333,19 @@ async def get_dashboard(request: Request):
             )
             total_cached = cache_result.scalar() or 0
             
-            total_processed = total_input + total_cached
-            efficiency = (total_cached / total_processed * 100) if total_processed > 0 else 0
+            # Calculate gateway savings (pruning, stripping, etc.)
+            gateway_result = await session.execute(
+                select(func.sum(UsageRecord.gateway_tokens_saved))
+            )
+            total_gateway_saved = gateway_result.scalar() or 0
+            
+            total_processed = total_input + total_cached + total_gateway_saved
+            efficiency = ((total_cached + total_gateway_saved) / total_processed * 100) if total_processed > 0 else 0
             
             # Estimate savings: cached tokens cost less to process
             cache_cost_savings = total_cached * 0.001 * 0.003  # rough estimate
-            savings_usd = cache_cost_savings
+            gateway_cost_savings = total_gateway_saved * 0.001 * 0.003  # tokens never sent
+            savings_usd = cache_cost_savings + gateway_cost_savings
             
             active_connections = 0
             try:
@@ -357,8 +365,9 @@ async def get_dashboard(request: Request):
                 for r in recent_rows:
                     total_in = r.input_tokens or 0
                     cache_r = r.cache_read_input_tokens or 0
-                    total_tokens = total_in + cache_r
-                    savings_pct = (cache_r / total_tokens * 100) if total_tokens > 0 else 0
+                    gateway_saved = r.gateway_tokens_saved or 0
+                    total_tokens = total_in + cache_r + gateway_saved
+                    savings_pct = ((cache_r + gateway_saved) / total_tokens * 100) if total_tokens > 0 else 0
                     
                     ts = "00:00:00"
                     if r.timestamp:
@@ -369,8 +378,9 @@ async def get_dashboard(request: Request):
                         "model": (r.model or "unknown").replace("claude-3-5-", ""),
                         "input": total_in,
                         "cache_read": cache_r,
+                        "gateway_saved": gateway_saved,
                         "output": r.output_tokens or 0,
-                        "savings_pct": savings_pct
+                        "savings_pct": f"{savings_pct:.1f}"
                     })
             except Exception as e:
                 import logging
@@ -379,8 +389,9 @@ async def get_dashboard(request: Request):
         html = DASHBOARD_HTML
         html = html.replace("{{ total_input }}", f"{total_input:,}")
         html = html.replace("{{ total_cached }}", f"{total_cached:,}")
-        html = html.replace("{{ efficiency }}", str(efficiency))
-        html = html.replace("{{ savings_usd }}", str(savings_usd))
+        html = html.replace("{{ total_gateway_saved }}", f"{total_gateway_saved:,}")
+        html = html.replace("{{ efficiency }}", f"{efficiency:.1f}%")
+        html = html.replace("{{ savings_usd }}", f"${savings_usd:.4f}")
         html = html.replace("{{ active_connections }}", str(active_connections))
         
         rows_html = ""
@@ -392,7 +403,8 @@ async def get_dashboard(request: Request):
                 <td style="font-family: monospace; font-size: 0.75rem;">{r['model']}</td>
                 <td>{badge}</td>
                 <td>{r['input']}</td>
-                <td style="color: var(--primary)">{r['cache_read']}</td>
+                <td style="color: #10b981;">{r['cache_read']}</td>
+                <td style="color: #3b82f6;">{r['gateway_saved']}</td>
                 <td>{r['output']}</td>
                 <td>{r['savings_pct']}%</td>
             </tr>
