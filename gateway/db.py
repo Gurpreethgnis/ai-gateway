@@ -63,7 +63,7 @@ class FileHashEntry(Base):
     file_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     content_preview: Mapped[str] = mapped_column(Text, default="")
-    full_content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # Store full content for retrieval
+    # full_content stored via raw SQL when column exists (see file_cache.py); run migration to add it
     char_count: Mapped[int] = mapped_column(Integer, default=0)
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

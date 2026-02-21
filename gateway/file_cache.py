@@ -12,6 +12,20 @@ def compute_content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8", errors="ignore")).hexdigest()
 
 
+async def _store_full_content_raw(session, entry_id: int, content: str) -> None:
+    """Store full_content via raw SQL so we don't require the column to exist (optional migration)."""
+    try:
+        from sqlalchemy import text
+        await session.execute(
+            text("UPDATE file_hash_entries SET full_content = :c WHERE id = :id"),
+            {"c": content, "id": entry_id},
+        )
+    except Exception as e:
+        # Column may not exist yet (migration not run)
+        if "full_content" not in str(e).lower() and "column" not in str(e).lower():
+            log.warning("File cache full_content update failed: %r", e)
+
+
 async def check_file_cache(
     project_id: Optional[int],
     content: str,
@@ -101,7 +115,6 @@ async def store_file_hash(
         try:
             from gateway.db import get_session, FileHashEntry
             from sqlalchemy import select
-            from sqlalchemy.dialects.postgresql import insert
 
             async with get_session() as session:
                 existing = await session.execute(
@@ -116,19 +129,19 @@ async def store_file_hash(
                     entry.last_seen = datetime.utcnow()
                     if file_path:
                         entry.file_path = file_path
-                    # Store full content in DB for retrieval
-                    entry.full_content = content
+                    await _store_full_content_raw(session, entry.id, content)
                 else:
                     new_entry = FileHashEntry(
                         project_id=project_id,
                         file_path=file_path or "unknown",
                         content_hash=content_hash,
                         content_preview=content[:500],
-                        full_content=content,  # Store full content
                         char_count=len(content),
                         last_seen=datetime.utcnow(),
                     )
                     session.add(new_entry)
+                    await session.flush()
+                    await _store_full_content_raw(session, new_entry.id, content)
 
         except Exception as e:
             log.warning("File cache DB store failed: %r", e)
@@ -195,36 +208,38 @@ async def get_file_by_hash(
         except Exception as e:
             log.warning("File content Redis retrieval failed: %r", e)
     
-    # Try database
+    # Try database (raw SQL so full_content column is optional until migration is run)
     if DATABASE_URL and project_id:
         try:
-            from gateway.db import get_session, FileHashEntry
-            from sqlalchemy import select
+            from gateway.db import get_session
+            from sqlalchemy import text
 
             async with get_session() as session:
-                query = select(FileHashEntry).where(
-                    FileHashEntry.project_id == project_id,
-                    FileHashEntry.content_hash == content_hash,
+                result = await session.execute(
+                    text(
+                        "SELECT full_content FROM file_hash_entries "
+                        "WHERE project_id = :pid AND content_hash = :h AND full_content IS NOT NULL"
+                    ),
+                    {"pid": project_id, "h": content_hash},
                 )
-                result = await session.execute(query)
-                entry = result.scalar_one_or_none()
-
-                if entry and hasattr(entry, 'full_content') and entry.full_content:
-                    log.debug("Retrieved file content from DB: %s chars", len(entry.full_content))
-                    # Warm Redis cache
+                row = result.fetchone()
+                if row and row[0]:
+                    content = row[0]
+                    log.debug("Retrieved file content from DB: %s chars", len(content))
                     if rds is not None:
                         try:
                             rds.setex(
                                 f"filecontent:{project_id}:{content_hash}",
                                 FILE_HASH_CACHE_TTL * 2,
-                                entry.full_content,
+                                content,
                             )
                         except Exception:
                             pass
-                    return entry.full_content
-
+                    return content
         except Exception as e:
-            log.warning("File content DB retrieval failed: %r", e)
+            # Column may not exist yet (migration not run)
+            if "full_content" not in str(e).lower() and "column" not in str(e).lower():
+                log.warning("File content DB retrieval failed: %r", e)
     
     return None
 
