@@ -879,6 +879,7 @@ async def openai_chat_completions(req: Request):
     if not resp:
         raise last_err or HTTPException(status_code=502, detail="Upstream model error after retries")
     tool_calls: List[Dict[str, Any]] = []
+    out_text_parts: List[str] = []
 
     try:
         content_blocks = getattr(resp, "content", []) or (resp.get("content") if isinstance(resp, dict) else [])
