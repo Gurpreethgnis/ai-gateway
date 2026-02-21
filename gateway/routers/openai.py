@@ -23,6 +23,8 @@ from gateway.config import (
     ENABLE_MULTI_PROJECT,
     ENABLE_PLUGIN_TOOLS,
     DATABASE_URL,
+    RETRY_ENABLED,
+    RETRY_MAX_ATTEMPTS,
 )
 from gateway.logging_setup import log
 from gateway.routing import route_model_from_messages, with_model_prefix, strip_model_prefix, VALID_ANTHROPIC_MODELS, get_fallback_model

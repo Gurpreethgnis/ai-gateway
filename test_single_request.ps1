@@ -1,14 +1,9 @@
 # Simpler PowerShell test - just send one request
 # Usage: .\test_single_request.ps1
 
-# Replace these with your actual values
-$GATEWAY_URL = "https://your-gateway.railway.app"
-$GATEWAY_API_KEY = "your-gateway-api-key-here"
-
-# OR set from environment
-if ($env:GATEWAY_API_KEY) {
-    $GATEWAY_API_KEY = $env:GATEWAY_API_KEY
-}
+# Use environment variables if set; otherwise replace these with your actual values
+$GATEWAY_URL = if ($env:GATEWAY_URL) { $env:GATEWAY_URL } else { "https://your-gateway.railway.app" }
+$GATEWAY_API_KEY = if ($env:GATEWAY_API_KEY) { $env:GATEWAY_API_KEY } else { "your-gateway-api-key-here" }
 
 $body = @{
     model = "claude-sonnet-4-0"
@@ -25,6 +20,10 @@ $headers = @{
     "Authorization" = "Bearer $GATEWAY_API_KEY"
     "Content-Type" = "application/json"
 }
+# Send X-Debug: 1 to get the real error message in the response when gateway returns 500
+if ($env:GATEWAY_DEBUG -eq "1") {
+    $headers["X-Debug"] = "1"
+}
 
 Write-Host "Sending request to $GATEWAY_URL..." -ForegroundColor Cyan
 
@@ -40,6 +39,18 @@ try {
 } catch {
     Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host ""
-    Write-Host "Response:" -ForegroundColor Yellow
-    Write-Host $_.Exception.Response -ForegroundColor Gray
+    # Show response body when present (e.g. X-Debug: 1 returns error_type and error_message)
+    $body = $_.ErrorDetails.Message
+    if ($body) {
+        Write-Host "Response body:" -ForegroundColor Yellow
+        Write-Host $body -ForegroundColor Gray
+        $json = $body | ConvertFrom-Json -ErrorAction SilentlyContinue
+        if ($json.error_type) {
+            Write-Host ""
+            Write-Host "Fix: $($json.error_type) - $($json.error_message)" -ForegroundColor Cyan
+        }
+    }
+    Write-Host ""
+    Write-Host "To see the real server error, deploy then run: " -ForegroundColor Yellow
+    Write-Host "  `$env:GATEWAY_DEBUG = '1'; .\test_single_request.ps1" -ForegroundColor White
 }

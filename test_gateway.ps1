@@ -1,9 +1,9 @@
 # PowerShell script to test AI Gateway cost savings
 # Usage: .\test_gateway.ps1
 
-# Configuration
-$GATEWAY_URL = "https://your-gateway.railway.app"  # Replace with your Railway URL
-$GATEWAY_API_KEY = $env:GATEWAY_API_KEY  # Set this in your environment or replace directly
+# Use environment variables if set; otherwise replace with your actual values
+$GATEWAY_URL = if ($env:GATEWAY_URL) { $env:GATEWAY_URL } else { "https://your-gateway.railway.app" }
+$GATEWAY_API_KEY = if ($env:GATEWAY_API_KEY) { $env:GATEWAY_API_KEY } else { "your-gateway-api-key-here" }
 
 if (-not $GATEWAY_API_KEY) {
     Write-Host "[ERROR] GATEWAY_API_KEY not set!" -ForegroundColor Red

@@ -51,4 +51,17 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     ray = request.headers.get("cf-ray") or ""
     log.error("UNHANDLED EXCEPTION (cf-ray=%s): %r", ray, exc)
     log.error(traceback.format_exc())
+    # When X-Debug: 1 or DEBUG_ERROR_RESPONSE=1, return the real error so you can fix it (e.g. in Railway logs or curl -H "X-Debug: 1")
+    import os
+    debug = request.headers.get("x-debug", "").strip() == "1" or os.getenv("DEBUG_ERROR_RESPONSE", "").strip() == "1"
+    if debug:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": "Internal error",
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "cf_ray": ray,
+            },
+        )
     return JSONResponse(status_code=500, content={"detail": "Internal error"})
