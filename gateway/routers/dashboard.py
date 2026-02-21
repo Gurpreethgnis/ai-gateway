@@ -107,6 +107,8 @@ DASHBOARD_HTML = """
             border: 1px solid var(--border);
             border-radius: 1rem;
             overflow: hidden;
+            max-height: 400px;
+            overflow-y: auto;
         }
 
         table {
@@ -197,6 +199,30 @@ DASHBOARD_HTML = """
                 <span class="card-label">Active Connections</span>
                 <div class="card-value">{{ active_connections }}</div>
                 <div class="card-sub">In Redis Queue</div>
+            </div>
+        </div>
+
+        <h2 style="margin-bottom: 1.5rem; font-size: 1.25rem;">Token Savings Breakdown</h2>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem;">
+            <div class="card">
+                <span class="card-label">Anthropic Cache</span>
+                <div class="card-value">{{ total_cached:,}} tokens</div>
+                <div class="card-sub">Cached by Anthropic</div>
+            </div>
+            <div class="card">
+                <span class="card-label">Context Pruning</span>
+                <div class="card-value">Enabled</div>
+                <div class="card-sub">Removes old messages</div>
+            </div>
+            <div class="card">
+                <span class="card-label">Boilerplate Strip</span>
+                <div class="card-value">Enabled</div>
+                <div class="card-sub">Removes IDE noise</div>
+            </div>
+            <div class="card">
+                <span class="card-label">Content Limits</span>
+                <div class="card-value">20K/60K</div>
+                <div class="card-sub">Tool/User msg limits</div>
             </div>
         </div>
 
