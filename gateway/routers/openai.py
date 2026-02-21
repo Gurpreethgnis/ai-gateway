@@ -233,10 +233,19 @@ async def openai_chat_completions(req: Request):
         content_text = raw_content
         if isinstance(content_text, str):
             content_text = content_text
+        elif isinstance(content_text, list):
+            # Extract text from OpenAI/Anthropic content blocks
+            parts = []
+            for b in content_text:
+                if isinstance(b, str):
+                    parts.append(b)
+                elif isinstance(b, dict):
+                    parts.append(b.get("text") or "")
+            content_text = "\n".join([p for p in parts if p])
         elif content_text is None:
             content_text = ""
         else:
-            content_text = json.dumps(content_text, ensure_ascii=False)
+            content_text = str(content_text)
         content_text = content_text or ""
 
         if role in ("system", "developer"):
@@ -565,7 +574,10 @@ async def openai_chat_completions(req: Request):
                                     if etype == "content_block_delta" and delta is not None:
                                         delta_type = getattr(delta, "type", None) if not isinstance(delta, dict) else delta.get("type")
                                         if delta_type == "text_delta":
-                                            txt = getattr(delta, "text", None) if not isinstance(delta, dict) else delta.get("text")
+                                            if isinstance(delta, dict):
+                                                txt = delta.get("text")
+                                            else:
+                                                txt = getattr(delta, "text", None)
                                             if txt:
                                                 yielded_any = True
                                                 asyncio.run_coroutine_threadsafe(q.put(("text", txt)), loop)
@@ -798,10 +810,17 @@ async def openai_chat_completions(req: Request):
     tool_calls: List[Dict[str, Any]] = []
 
     try:
-        for block in getattr(resp, "content", []) or []:
-            btype = getattr(block, "type", None)
+        content_blocks = getattr(resp, "content", []) or (resp.get("content") if isinstance(resp, dict) else [])
+        for block in content_blocks:
+            if isinstance(block, dict):
+                btype = block.get("type")
+                btext = block.get("text", "")
+            else:
+                btype = getattr(block, "type", None)
+                btext = getattr(block, "text", "")
+            
             if btype == "text":
-                out_text_parts.append(getattr(block, "text", "") or "")
+                out_text_parts.append(btext or "")
             elif btype == "tool_use":
                 tool_use_id = getattr(block, "id", "") or ""
                 name = getattr(block, "name", "") or ""
