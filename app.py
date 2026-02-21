@@ -19,7 +19,6 @@ from gateway.routers.health import router as health_router
 from gateway.routers.chat import router as chat_router
 from gateway.routers.openai import router as openai_router
 from gateway.routers.admin import router as admin_router
-from gateway.routers.dashboard import router as dashboard_router
 
 setup_logging()
 
@@ -28,15 +27,12 @@ setup_logging()
 async def lifespan(app: FastAPI):
     if DATABASE_URL:
         try:
-            import gateway.db as db
-            db.init_db()
-            await db.create_tables()
-            await db.run_migrations()
+            from gateway.db import init_db, create_tables
+            init_db()
+            await create_tables()
             log.info("Database initialized successfully")
         except Exception as e:
             log.warning("Database initialization failed: %r", e)
-            import traceback
-            log.error(traceback.format_exc())
     yield
 
 
@@ -57,7 +53,6 @@ app.include_router(health_router)
 app.include_router(chat_router)
 app.include_router(openai_router)
 app.include_router(admin_router)
-app.include_router(dashboard_router)
 
 if ENABLE_BATCH_API:
     from gateway.batch import router as batch_router

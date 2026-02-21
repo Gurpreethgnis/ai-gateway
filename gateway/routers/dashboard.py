@@ -242,6 +242,42 @@ DASHBOARD_HTML = """
 
 @router.get("/dashboard", response_class=HTMLResponse)
 async def get_dashboard(request: Request):
+    from gateway.db import async_session_factory
+    if async_session_factory is None:
+        return HTMLResponse(content="""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>AI Gateway — Setup Required</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+        .box { background: #1e293b; border: 1px solid #334155; border-radius: 1rem; padding: 2.5rem; max-width: 520px; text-align: center; }
+        h1 { font-size: 1.5rem; margin-bottom: 0.5rem; color: #38bdf8; }
+        p { color: #94a3b8; line-height: 1.6; }
+        .steps { text-align: left; background: #0f172a; border-radius: 0.75rem; padding: 1.25rem 1.5rem; margin-top: 1.5rem; }
+        .steps li { color: #cbd5e1; margin: 0.5rem 0; }
+        code { background: #334155; padding: 0.1rem 0.4rem; border-radius: 0.3rem; font-size: 0.875rem; color: #38bdf8; }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h1>📊 Database Not Connected</h1>
+        <p>The dashboard needs a PostgreSQL database to store and display your token savings.</p>
+        <div class="steps">
+            <ol>
+                <li>In Railway, click <strong>+ New → Database → PostgreSQL</strong></li>
+                <li>Railway will auto-add <code>DATABASE_URL</code> to your service</li>
+                <li>Your gateway will restart and begin tracking stats</li>
+                <li>Come back here to see your token savings! 🎉</li>
+            </ol>
+        </div>
+    </div>
+</body>
+</html>
+""", status_code=200)
+
     try:
         async with get_session() as session:
             # Aggregates

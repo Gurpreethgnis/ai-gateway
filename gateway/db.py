@@ -9,8 +9,6 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
 from gateway.config import DATABASE_URL
-import logging
-log = logging.getLogger("gateway")
 
 class Base(DeclarativeBase):
     pass
@@ -41,8 +39,6 @@ class UsageRecord(Base):
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     model: Mapped[str] = mapped_column(String(100), nullable=False)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    cache_read_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    cache_creation_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     cached: Mapped[bool] = mapped_column(default=False)
@@ -149,20 +145,15 @@ async_session_factory = None
 
 def init_db():
     global engine, async_session_factory
-    
-    # Try common database URL names for various hosting providers
-    db_url = DATABASE_URL or os.getenv("POSTGRES_URL") or os.getenv("DATABASE_PRIVATE_URL") or os.getenv("INTERNAL_DATABASE_URL")
-    
-    if not db_url:
-        log.warning("DATABASE_URL is not set. Database features will be disabled.")
+    if not DATABASE_URL:
         return
     
+    db_url = DATABASE_URL
     if db_url.startswith("postgres://"):
         db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
     elif db_url.startswith("postgresql://"):
         db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
     
-    log.info("Initializing database with URL: %s", db_url.split("@")[-1]) # Log only host for safety
     engine = create_async_engine(db_url, echo=False, pool_pre_ping=True)
     async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -174,37 +165,10 @@ async def create_tables():
         await conn.run_sync(Base.metadata.create_all)
 
 
-async def run_migrations():
-    """Manual migration to add new columns to existing tables."""
-    if engine is None:
-        return
-    
-    from sqlalchemy import text
-    async with engine.begin() as conn:
-        # Check dialect for safety
-        dialect = conn.dialect.name
-        
-        if dialect == "postgresql":
-            try:
-                await conn.execute(text("ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS cache_read_input_tokens INTEGER DEFAULT 0"))
-                await conn.execute(text("ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS cache_creation_input_tokens INTEGER DEFAULT 0"))
-                log.info("Postgres migrations applied successfully")
-            except Exception as e:
-                log.debug("Postgres migration error (might already exist): %r", e)
-        else:
-            # Generic approach for other DBs (SQLite etc)
-            try:
-                await conn.execute(text("ALTER TABLE usage_records ADD COLUMN cache_read_input_tokens INTEGER DEFAULT 0"))
-                await conn.execute(text("ALTER TABLE usage_records ADD COLUMN cache_creation_input_tokens INTEGER DEFAULT 0"))
-                log.info("Generic migrations applied successfully")
-            except Exception as e:
-                log.debug("Generic migration error: %r", e)
-
-
 @asynccontextmanager
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     if async_session_factory is None:
-        raise RuntimeError("Database not initialized. Set DATABASE_URL environment variable.")
+        raise RuntimeError("Database not initialized. Set DATABASE_URL.")
     async with async_session_factory() as session:
         try:
             yield session
@@ -212,32 +176,6 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
         except Exception:
             await session.rollback()
             raise
-
-
-async def record_usage_to_db(
-    project_id: Optional[int],
-    model: str,
-    input_tokens: int,
-    output_tokens: int,
-    cf_ray: str,
-    cached: bool,
-    cache_read_input_tokens: int = 0,
-    cache_creation_input_tokens: int = 0,
-):
-    cost = calculate_cost(model, input_tokens, output_tokens)
-    async with get_session() as session:
-        record = UsageRecord(
-            project_id=project_id,
-            model=model,
-            input_tokens=input_tokens,
-            cache_read_input_tokens=cache_read_input_tokens,
-            cache_creation_input_tokens=cache_creation_input_tokens,
-            output_tokens=output_tokens,
-            cost_usd=cost,
-            cached=cached,
-            cf_ray=cf_ray,
-        )
-        session.add(record)
 
 
 def hash_api_key(api_key: str) -> str:
@@ -249,8 +187,6 @@ COST_PER_1K_TOKENS = {
     "claude-opus-4-5": {"input": 0.015, "output": 0.075},
     "claude-3-5-sonnet-20241022": {"input": 0.003, "output": 0.015},
     "claude-3-opus-20240229": {"input": 0.015, "output": 0.075},
-    "claude-3-5-haiku-20241022": {"input": 0.0008, "output": 0.004},
-    "claude-3-haiku-20240307": {"input": 0.00025, "output": 0.00125},
 }
 
 
