@@ -217,7 +217,8 @@ async def openai_chat_completions(req: Request):
         content_text = content_text or ""
 
         if role in ("system", "developer"):
-            new_text, _meta = strip_or_truncate(role, content_text, LIMITS["system_max"], allow_strip=True)
+            new_text, meta = strip_or_truncate(role, content_text, LIMITS["system_max"], allow_strip=True)
+            track_reduction(meta)
             if new_text.strip():
                 system_parts.append(new_text.strip())
             continue
@@ -225,7 +226,8 @@ async def openai_chat_completions(req: Request):
         if role == "tool":
             tool_call_id = m.get("tool_call_id", "") if isinstance(m, dict) else get_extra(m, "tool_call_id", "")
             tool_call_id = tool_call_id or ""
-            tool_text, _tmeta = strip_or_truncate("tool", content_text, LIMITS["tool_result_max"], allow_strip=False)
+            tool_text, tmeta = strip_or_truncate("tool", content_text, LIMITS["tool_result_max"], allow_strip=False)
+            track_reduction(tmeta)
 
             if ENABLE_FILE_HASH_CACHE:
                 try:
@@ -287,7 +289,8 @@ async def openai_chat_completions(req: Request):
                         idx += 1
                         
                         if use_id:
-                            tool_text, _ = strip_or_truncate("tool", part, LIMITS["tool_result_max"], allow_strip=False)
+                            tool_text, tmeta = strip_or_truncate("tool", part, LIMITS["tool_result_max"], allow_strip=False)
+                            track_reduction(tmeta)
                             blocks_as_tool_results.append({
                                 "type": "tool_result",
                                 "tool_use_id": use_id,
@@ -334,7 +337,8 @@ async def openai_chat_completions(req: Request):
                             aa_messages.append({"role": "user", "content": anthropic_content})
                             continue
             flush_tool_results()
-            new_text, _meta = strip_or_truncate("user", content_text, LIMITS["user_msg_max"], allow_strip=True)
+            new_text, meta = strip_or_truncate("user", content_text, LIMITS["user_msg_max"], allow_strip=True)
+            track_reduction(meta)
             if new_text:
                 user_join.append(new_text)
                 aa_messages.append({"role": "user", "content": new_text})
@@ -399,7 +403,8 @@ async def openai_chat_completions(req: Request):
 
     system_text = "\n\n".join([p for p in system_parts if p]).strip()
     system_text = enforce_diff_first(system_text)
-    system_text, _ = strip_or_truncate("system", system_text, LIMITS["system_max"], allow_strip=False)
+    system_text, meta = strip_or_truncate("system", system_text, LIMITS["system_max"], allow_strip=False)
+    track_reduction(meta)
 
     if ENABLE_MEMORY_LAYER and project_id:
         try:
@@ -441,6 +446,18 @@ async def openai_chat_completions(req: Request):
     temperature = parsed.get("temperature") if parsed.get("temperature") is not None else 0.2
 
     gateway_tokens_saved = 0
+    
+    # Track token reductions from stripping and truncation
+    def track_reduction(meta: Dict[str, Any]):
+        nonlocal gateway_tokens_saved
+        if meta.get("stripped") or meta.get("truncated"):
+            chars_saved = meta.get("before", 0) - meta.get("after", 0)
+            # Rough estimate: 4 chars per token
+            tokens_saved = chars_saved // 4
+            gateway_tokens_saved += tokens_saved
+            log.debug("Gateway reduction: %d chars -> %d tokens (total: %d)", 
+                     chars_saved, tokens_saved, gateway_tokens_saved)
+    
     if ENABLE_CONTEXT_PRUNING:
         try:
             from gateway.context_pruner import prune_context
