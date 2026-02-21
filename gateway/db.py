@@ -39,6 +39,8 @@ class UsageRecord(Base):
     project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"), nullable=True)
     model: Mapped[str] = mapped_column(String(100), nullable=False)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_read_input_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    cache_creation_input_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     cached: Mapped[bool] = mapped_column(default=False)
@@ -168,6 +170,16 @@ async def create_tables():
             await conn.execute(text("ALTER TABLE usage_records ALTER COLUMN project_id DROP NOT NULL"))
         except Exception:
             pass  # column may already be nullable or table just created with new schema
+        
+        # Make cache-related columns nullable if they exist
+        try:
+            await conn.execute(text("ALTER TABLE usage_records ALTER COLUMN cache_read_input_tokens DROP NOT NULL"))
+        except Exception:
+            pass  # column may not exist or already nullable
+        try:
+            await conn.execute(text("ALTER TABLE usage_records ALTER COLUMN cache_creation_input_tokens DROP NOT NULL"))
+        except Exception:
+            pass  # column may not exist or already nullable
 
 
 @asynccontextmanager
