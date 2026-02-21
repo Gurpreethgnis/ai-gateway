@@ -613,8 +613,8 @@ async def openai_chat_completions(req: Request):
                                 status = getattr(resp, "status_code", None) if resp else None
                             
                             if status == 429:
-                                log.warning("STREAM RateLimit hit (429), failing over to claude-3-5-haiku-20241022 for next attempt")
-                                payload["model"] = "claude-3-5-haiku-20241022"
+                                log.warning("STREAM RateLimit hit (429), failing over to claude-3-haiku-20240307 for next attempt")
+                                payload["model"] = "claude-3-haiku-20240307"
                                 # Note: the new model will grab a different queue pool slot on next attempt
                             
                             time.sleep(1.0 * (2 ** attempt))
