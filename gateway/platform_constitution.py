@@ -6,6 +6,12 @@ By separating these from dynamic per-request instructions, we enable
 Anthropic's prompt caching to read these blocks at ~10% cost on subsequent requests.
 
 Version the constitution when making changes to invalidate old cache entries.
+
+Usage: Do NOT auto-inject these blocks into user requests. The gateway must act as
+a transparent proxy: the client's system prompt is forwarded as-is. This module is
+for opt-in use only (e.g. when a client explicitly requests gateway rules via a
+header or parameter), so that applications relying on specific model behavior are
+not modified or given unrequested instructions.
 """
 
 VERSION = "1.0.0"

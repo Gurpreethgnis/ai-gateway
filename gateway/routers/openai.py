@@ -495,33 +495,11 @@ async def openai_chat_completions(req: Request):
 
     aa_messages = drop_leading_tool_result_only_messages(aa_messages)
 
-    # Build system prompt with cacheable blocks for real cost savings
-    if ENABLE_ANTHROPIC_CACHE_CONTROL:
-        from gateway.platform_constitution import get_cacheable_system_blocks, VERSION as CONSTITUTION_VERSION
-        
-        system_blocks = []
-        
-        # Add cacheable constitution and diff-first rules
-        # These blocks form 70-80% of typical prompts and cost ~10% on cache hits
-        if system_text and len(system_text) >= 1024:
-            system_blocks.extend(get_cacheable_system_blocks(
-                include_constitution=True,
-                include_diff_rules=True
-            ))
-            
-            # Add dynamic per-request system text (not cached)
-            system_blocks.append({
-                "type": "text",
-                "text": system_text
-            })
-        elif system_text:
-            # Short system text - just send as-is
-            system_blocks.append({
-                "type": "text",
-                "text": system_text
-            })
-        
-        system_param = system_blocks if system_blocks else system_text
+    # Apply cache control to user's system prompt only; do not inject gateway content.
+    # Transparent proxy: forward the client's system prompt as-is. When caching is enabled,
+    # wrap long system prompts in a single cacheable block for cost savings without modifying content.
+    if ENABLE_ANTHROPIC_CACHE_CONTROL and system_text and len(system_text) >= 1024:
+        system_param = [{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}]
     else:
         system_param = system_text
 
