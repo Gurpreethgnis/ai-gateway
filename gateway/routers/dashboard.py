@@ -328,10 +328,15 @@ async def get_dashboard(request: Request):
             total_input = total_input or 0
             total_cost = total_cost or 0
             # Calculate cache efficiency and savings
-            cache_result = await session.execute(
-                select(func.sum(UsageRecord.cache_read_input_tokens))
-            )
-            total_cached = cache_result.scalar() or 0
+            total_cached = 0
+            try:
+                cache_result = await session.execute(
+                    select(func.sum(UsageRecord.cache_read_input_tokens))
+                )
+                total_cached = cache_result.scalar() or 0
+            except Exception as e:
+                import logging
+                logging.getLogger("gateway").error("Dashboard cache query failed: %r", e)
             
             # Calculate gateway savings (pruning, stripping, etc.)
             total_gateway_saved = 0
