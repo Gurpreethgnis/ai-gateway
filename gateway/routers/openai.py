@@ -62,7 +62,7 @@ from gateway.metrics import (
     decrement_active_requests,
 )
 from gateway.telemetry import emit_error, emit_request
-from gateway.db import calculate_cost
+from gateway.db import calculate_cost, record_usage_to_db
 
 router = APIRouter()
 

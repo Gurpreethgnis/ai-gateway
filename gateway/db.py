@@ -182,6 +182,32 @@ def hash_api_key(api_key: str) -> str:
     return hashlib.sha256(api_key.encode()).hexdigest()
 
 
+async def record_usage_to_db(
+    project_id,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cf_ray: str,
+    cached: bool,
+):
+    try:
+        cost = calculate_cost(model, input_tokens, output_tokens)
+        async with get_session() as session:
+            record = UsageRecord(
+                project_id=project_id,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=cost,
+                cached=cached,
+                cf_ray=cf_ray,
+            )
+            session.add(record)
+    except Exception as e:
+        import logging
+        logging.getLogger("gateway").warning("record_usage_to_db failed: %r", e)
+
+
 COST_PER_1K_TOKENS = {
     "claude-sonnet-4-0": {"input": 0.003, "output": 0.015},
     "claude-opus-4-5": {"input": 0.015, "output": 0.075},
