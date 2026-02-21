@@ -9,7 +9,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
 from gateway.config import DATABASE_URL
-from gateway.logging_setup import log
+import logging
+log = logging.getLogger("gateway")
 
 class Base(DeclarativeBase):
     pass
@@ -202,15 +203,8 @@ async def run_migrations():
 
 @asynccontextmanager
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
-    global async_session_factory
     if async_session_factory is None:
-        log.info("Lazy-initializing database session factory...")
-        init_db()
-        
-    if async_session_factory is None:
-        db_var_status = "SET" if (DATABASE_URL or os.getenv("POSTGRES_URL")) else "NOT SET"
-        raise RuntimeError(f"Database not initialized. DATABASE_URL is {db_var_status}.")
-        
+        raise RuntimeError("Database not initialized. Set DATABASE_URL environment variable.")
     async with async_session_factory() as session:
         try:
             yield session
