@@ -9,6 +9,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
 from gateway.config import DATABASE_URL
+from gateway.logging_setup import log
 
 class Base(DeclarativeBase):
     pass
