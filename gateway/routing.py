@@ -78,6 +78,59 @@ def map_model_alias(maybe: Optional[str]) -> Optional[str]:
 
     return None
 
+# Model Fallback Chains (Rotation)
+# Used when a model hits its hourly or concurrent rate limit (429).
+MODEL_FALLBACKS = {
+    # Sonnet 3.5 Chain
+    "claude-3-5-sonnet-20241022": [
+        "claude-3-5-sonnet-20240620",
+        "claude-3-5-sonnet-latest",
+        "claude-3-haiku-20240307",
+    ],
+    "claude-3-5-sonnet-20240620": [
+        "claude-3-5-sonnet-20241022",
+        "claude-3-5-sonnet-latest",
+        "claude-3-haiku-20240307",
+    ],
+    "claude-3-5-sonnet-latest": [
+        "claude-3-5-sonnet-20241022",
+        "claude-3-5-sonnet-20240620",
+        "claude-3-haiku-20240307",
+    ],
+    
+    # Opus Chain
+    "claude-3-opus-20240229": [
+        "claude-3-5-sonnet-20241022",
+        "claude-3-haiku-20240307",
+    ],
+    "claude-3-opus-latest": [
+        "claude-3-opus-20240229",
+        "claude-3-5-sonnet-20241022",
+    ],
+
+    # Haiku Chain
+    "claude-3-haiku-20240307": [
+        "claude-3-5-haiku-20241022",  # if available
+        "claude-3-5-sonnet-20240620",
+    ]
+}
+
+def get_fallback_model(current_model: str, attempt: int) -> str:
+    """
+    Returns the next model in the rotation for the given attempt index.
+    If no specific fallback is defined, returns Haiku as the ultimate baseline.
+    """
+    base = strip_model_prefix(current_model) or ""
+    chain = MODEL_FALLBACKS.get(base, [])
+    
+    if not chain:
+        # Generic fallback for unknown models
+        return "claude-3-haiku-20240307" if attempt > 0 else current_model
+
+    # Use modulo to cycle through the chain if multiple retries happen
+    fallback_idx = (attempt - 1) % len(chain)
+    return chain[fallback_idx]
+
 def route_model_from_messages(user_text: str, explicit_model: Optional[str]) -> str:
     mapped = map_model_alias(explicit_model)
     if mapped:

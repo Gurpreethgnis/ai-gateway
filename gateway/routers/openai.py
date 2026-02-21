@@ -25,7 +25,7 @@ from gateway.config import (
     DATABASE_URL,
 )
 from gateway.logging_setup import log
-from gateway.routing import route_model_from_messages, with_model_prefix, strip_model_prefix, VALID_ANTHROPIC_MODELS
+from gateway.routing import route_model_from_messages, with_model_prefix, strip_model_prefix, VALID_ANTHROPIC_MODELS, get_fallback_model
 from gateway.cache import cache_key, cache_get, cache_set
 from gateway.anthropic_client import (
     client,
@@ -642,9 +642,11 @@ async def openai_chat_completions(req: Request):
                                 status = getattr(resp, "status_code", None) if resp else None
                             
                             if status == 429:
-                                log.warning("STREAM RateLimit hit (429), failing over to claude-3-haiku-20240307 for next attempt")
-                                payload["model"] = "claude-3-haiku-20240307"
-                                # Note: the new model will grab a different queue pool slot on next attempt
+                                fallback_model = get_fallback_model(payload["model"], attempt + 1)
+                                log.warning("STREAM RateLimit hit (429) for %s, failing over to %s for attempt %d", payload["model"], fallback_model, attempt + 1)
+                                payload["model"] = fallback_model
+                                # Signal model switch back to sse_stream so it can update its local variables/metrics
+                                asyncio.run_coroutine_threadsafe(q.put(("model_switch", fallback_model)), loop)
                             
                             time.sleep(1.0 * (2 ** attempt))
                             continue
@@ -675,6 +677,12 @@ async def openai_chat_completions(req: Request):
 
             while not finished:
                 kind, payload_item = await q.get()
+
+                if kind == "model_switch":
+                    decrement_active_requests(model)
+                    model = payload_item
+                    increment_active_requests(model)
+                    continue
 
                 if kind == "error":
                     record_upstream_error(model, "stream_error", 500)
@@ -780,49 +788,62 @@ async def openai_chat_completions(req: Request):
 
     increment_active_requests(model)
 
-    try:
-        async def _call_upstream():
-            return await call_anthropic_with_timeout(payload)
+    max_attempts = RETRY_MAX_ATTEMPTS if RETRY_ENABLED else 1
+    resp = None
+    last_err = None
 
+    for attempt in range(max_attempts):
+        req_id = acquire_concurrency_slot(model)
+        acquired_model = model
         try:
+            # Note: with_circuit_breaker uses a global breaker by default.
+            # We pass call_anthropic_with_timeout and its payload.
             resp = await with_circuit_breaker(
-                lambda: with_retry(_call_upstream)
+                call_anthropic_with_timeout,
+                payload
             )
-        except CircuitOpenError as e:
-            await emit_error(
-                "circuit_open", str(e), cf_ray=ray, model=model,
-                project_id=str(project_id) if project_id else None,
-            )
-            raise HTTPException(
-                status_code=503,
-                detail="Service temporarily unavailable",
-                headers={"Retry-After": str(e.retry_after)},
-            )
-        except RetryExhaustedError as e:
-            record_upstream_error(model, "retry_exhausted", 502)
-            await emit_error(
-                "retry_exhausted", str(e), cf_ray=ray, model=model,
-                project_id=str(project_id) if project_id else None,
-                exception=e.last_error,
-            )
-            raise HTTPException(status_code=502, detail="Upstream model error after retries")
+            break
+        except Exception as e:
+            last_err = e
+            status = getattr(e, "status_code", None)
+            if status is None:
+                rproto = getattr(e, "response", None)
+                status = getattr(rproto, "status_code", None) if rproto else None
+            
+            if status == 429 and attempt < max_attempts - 1:
+                fallback = get_fallback_model(model, attempt + 1)
+                log.warning("OA RateLimit hit (429) for %s, rotating to %s", model, fallback)
+                
+                # Update metrics for the model switch
+                decrement_active_requests(acquired_model)
+                model = fallback
+                increment_active_requests(model)
+                
+                payload["model"] = model
+                release_concurrency_slot(acquired_model, req_id)
+                await asyncio.sleep(1.0 * (2 ** attempt))
+                continue
+            
+            release_concurrency_slot(acquired_model, req_id)
+            if attempt == max_attempts - 1:
+                decrement_active_requests(model)
+                if isinstance(e, CircuitOpenError):
+                    record_upstream_error(model, "circuit_open", 503)
+                    raise HTTPException(status_code=503, detail="Upstream model circuit open")
+                
+                log_anthropic_error("OA create failed", payload, e)
+                await emit_error(
+                    "upstream_error", str(e), cf_ray=ray, model=model,
+                    project_id=str(project_id) if project_id else None,
+                    exception=e,
+                )
+                raise HTTPException(status_code=502, detail="Upstream model error")
+        finally:
+            if resp: # Success: release the slot for the model that actually worked
+                release_concurrency_slot(acquired_model, req_id)
 
-    except HTTPException:
-        decrement_active_requests(model)
-        raise
-    except Exception as e:
-        decrement_active_requests(model)
-        log.error("OA UPSTREAM ERROR (cf-ray=%s): %r", ray, e)
-        log.error(traceback.format_exc())
-        record_upstream_error(model, type(e).__name__, 502)
-        await emit_error(
-            "upstream_error", str(e), cf_ray=ray, model=model,
-            project_id=str(project_id) if project_id else None,
-            exception=e,
-        )
-        raise HTTPException(status_code=502, detail="Upstream model error")
-
-    out_text_parts: List[str] = []
+    if not resp:
+        raise last_err or HTTPException(status_code=502, detail="Upstream model error after retries")
     tool_calls: List[Dict[str, Any]] = []
 
     try:
