@@ -26,6 +26,16 @@ setup_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Clear any stale concurrency slots left over from previous deployments
+    try:
+        from gateway.cache import rds
+        if rds:
+            for family in ("sonnet", "opus", "haiku", "default"):
+                rds.delete(f"concurrency:anthropic:{family}")
+            log.info("Cleared stale concurrency slots from Redis")
+    except Exception as e:
+        log.warning("Could not clear Redis concurrency slots: %r", e)
+
     if DATABASE_URL:
         try:
             from gateway.db import init_db, create_tables

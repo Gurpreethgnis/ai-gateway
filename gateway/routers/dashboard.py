@@ -285,29 +285,26 @@ async def get_dashboard(request: Request):
                 total_q = await session.execute(
                     select(
                         func.sum(UsageRecord.input_tokens),
-                        func.sum(UsageRecord.cache_read_input_tokens),
-                        func.sum(UsageRecord.cache_creation_input_tokens),
                         func.sum(UsageRecord.cost_usd)
                     )
                 )
                 result = total_q.fetchone()
                 if result:
-                    total_input, total_cached, total_creation, total_cost = result
+                    total_input, total_cost = result
                 else:
-                    total_input, total_cached, total_creation, total_cost = 0, 0, 0, 0
+                    total_input, total_cost = 0, 0
             except Exception as e:
                 import logging
                 logging.getLogger("gateway").error("Dashboard aggregate query failed: %r", e)
-                total_input, total_cached, total_creation, total_cost = 0, 0, 0, 0
+                total_input, total_cost = 0, 0
 
             total_input = total_input or 0
-            total_cached = total_cached or 0
-            total_creation = total_creation or 0
             total_cost = total_cost or 0
+            total_cached = 0  # cache columns removed from schema
             
             total_processed = total_input
-            efficiency = round((total_cached / total_processed * 100) if total_processed > 0 else 0, 1)
-            savings_usd = round((total_cached / 1000000.0) * 3.0, 4)
+            efficiency = 0
+            savings_usd = 0
             
             active_connections = 0
             try:
@@ -326,8 +323,8 @@ async def get_dashboard(request: Request):
                 recent_rows = recent_q.scalars().all()
                 for r in recent_rows:
                     total_in = r.input_tokens or 0
-                    cache_r = r.cache_read_input_tokens or 0
-                    savings_pct = round((cache_r / total_in * 100) if total_in > 0 else 0, 1)
+                    cache_r = 0  # cache column removed
+                    savings_pct = 0
                     
                     ts = "00:00:00"
                     if r.timestamp:

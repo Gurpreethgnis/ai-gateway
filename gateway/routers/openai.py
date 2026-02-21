@@ -548,6 +548,7 @@ async def openai_chat_completions(req: Request):
                     yielded_any = False
                     
                     req_id = acquire_concurrency_slot(payload["model"])
+                    acquired_model = payload["model"]  # save before any failover changes it
                     try:
                         with client.messages.stream(**payload) as stream:
                             for ev in stream:
@@ -636,7 +637,7 @@ async def openai_chat_completions(req: Request):
                         break
                     
                     finally:
-                        release_concurrency_slot(payload["model"], req_id)
+                        release_concurrency_slot(acquired_model, req_id)
 
             loop.run_in_executor(None, _worker_stream)
 
