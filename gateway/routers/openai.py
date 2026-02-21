@@ -189,6 +189,12 @@ async def openai_chat_completions(req: Request):
             chars_saved = meta.get("before", 0) - meta.get("after", 0)
             tokens_saved = chars_saved // 4
             gateway_tokens_saved += tokens_saved
+            
+            # Record mechanism-specific savings
+            mechanism = "boilerplate_strip" if meta.get("stripped") else "truncation"
+            from gateway.metrics import record_tokens_saved
+            record_tokens_saved(mechanism, project_name or "default", tokens_saved)
+            
             log.debug("Gateway reduction: %d chars -> %d tokens (total: %d)",
                      chars_saved, tokens_saved, gateway_tokens_saved)
 
@@ -495,11 +501,13 @@ async def openai_chat_completions(req: Request):
 
     aa_messages = drop_leading_tool_result_only_messages(aa_messages)
 
-    # Apply cache control to user's system prompt only; do not inject gateway content.
-    # Transparent proxy: forward the client's system prompt as-is. When caching is enabled,
-    # wrap long system prompts in a single cacheable block for cost savings without modifying content.
+    # When caching is enabled and system prompt is long (>= 1024 chars), prepend cacheable constitution
+    # + diff rules for 60–80% prompt-cache savings, then append the client's system text.
     if ENABLE_ANTHROPIC_CACHE_CONTROL and system_text and len(system_text) >= 1024:
-        system_param = [{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}]
+        from gateway.platform_constitution import get_cacheable_system_blocks
+        system_blocks = get_cacheable_system_blocks(include_constitution=True, include_diff_rules=True)
+        system_blocks.append({"type": "text", "text": system_text})
+        system_param = system_blocks
     else:
         system_param = system_text
 

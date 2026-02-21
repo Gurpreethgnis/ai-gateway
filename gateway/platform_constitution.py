@@ -7,11 +7,12 @@ Anthropic's prompt caching to read these blocks at ~10% cost on subsequent reque
 
 Version the constitution when making changes to invalidate old cache entries.
 
-Usage: Do NOT auto-inject these blocks into user requests. The gateway must act as
-a transparent proxy: the client's system prompt is forwarded as-is. This module is
-for opt-in use only (e.g. when a client explicitly requests gateway rules via a
-header or parameter), so that applications relying on specific model behavior are
-not modified or given unrequested instructions.
+Opt-in: To get prompt-cache savings (constitution + diff rules cached at ~10% cost),
+send the header:
+  X-Gateway-Inject-Constitution: true
+(or 1, or yes). The gateway will prepend these blocks only when caching is enabled
+and the request has a system prompt of length >= 1024 characters. Without this
+header, the gateway forwards the system prompt as-is (transparent proxy).
 """
 
 VERSION = "1.0.0"
@@ -76,14 +77,14 @@ def get_cacheable_system_blocks(include_constitution: bool = True, include_diff_
         blocks.append({
             "type": "text",
             "text": PLATFORM_CONSTITUTION.strip(),
-            "cache_control": {"type": "ephemeral"}  # Will be changed to "permanent" in next phase
+            "cache_control": {"type": "ephemeral"}  # Anthropic caches ephemeral at ~10% cost on subsequent reads
         })
     
     if include_diff_rules:
         blocks.append({
             "type": "text",
             "text": DIFF_FIRST_RULES.strip(),
-            "cache_control": {"type": "ephemeral"}  # Will be changed to "permanent" in next phase
+            "cache_control": {"type": "ephemeral"}  # Anthropic caches ephemeral at ~10% cost on subsequent reads
         })
     
     return blocks

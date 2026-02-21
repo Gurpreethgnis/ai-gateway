@@ -88,6 +88,19 @@ if PROMETHEUS_AVAILABLE and PROMETHEUS_ENABLED:
         buckets=(1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0),
     )
 
+    # Token savings metrics - track per mechanism
+    TOKENS_SAVED = Counter(
+        "gateway_tokens_saved_total",
+        "Tokens saved by reduction mechanism",
+        ["mechanism", "project"],
+    )
+
+    PROMPT_CACHE_TOKENS = Counter(
+        "gateway_prompt_cache_tokens_total",
+        "Prompt cache tokens (read=cache hit, write=cache miss)",
+        ["type", "model", "project"],  # type: read or write
+    )
+
     GATEWAY_INFO = Info(
         "gateway",
         "Gateway information",
@@ -126,6 +139,8 @@ else:
     RETRY_COUNT = DummyMetric()
     UPSTREAM_ERRORS = DummyMetric()
     STREAM_DURATION = DummyMetric()
+    TOKENS_SAVED = DummyMetric()
+    PROMPT_CACHE_TOKENS = DummyMetric()
     GATEWAY_INFO = DummyMetric()
 
 
@@ -214,6 +229,24 @@ def increment_active_requests(model: str):
 
 def decrement_active_requests(model: str):
     ACTIVE_REQUESTS.labels(model=model).dec()
+
+
+def record_tokens_saved(mechanism: str, project: str, tokens: int):
+    """
+    Record tokens saved by a specific mechanism.
+    mechanism: 'prompt_cache', 'file_dedup', 'diff_first', 'context_pruning', 'boilerplate_strip'
+    """
+    project = project or "default"
+    TOKENS_SAVED.labels(mechanism=mechanism, project=project).inc(tokens)
+
+
+def record_prompt_cache_tokens(cache_type: str, model: str, project: str, tokens: int):
+    """
+    Record prompt cache token usage.
+    cache_type: 'read' (cache hit, ~10% cost) or 'write' (cache miss, full cost)
+    """
+    project = project or "default"
+    PROMPT_CACHE_TOKENS.labels(type=cache_type, model=model, project=project).inc(tokens)
 
 
 def get_metrics_output() -> bytes:

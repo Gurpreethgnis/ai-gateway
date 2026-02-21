@@ -25,17 +25,19 @@ async def check_file_cache(
 
     content_hash = compute_content_hash(content)
 
+    # Check Redis first
     if rds is not None:
         cache_key = f"filecache:{project_id or 'default'}:{content_hash}"
         try:
             cached = rds.get(cache_key)
             if cached:
                 record_cache_hit("file_hash")
-                ref_msg = f"[FILE_REF:{content_hash[:12]}] (unchanged from previous request)"
+                ref_msg = f"[FILE_REF:{content_hash[:12]}] (unchanged from previous request; call get_file_by_hash if you need the content)"
                 return True, content_hash, ref_msg
         except Exception as e:
             log.warning("File cache Redis check failed: %r", e)
 
+    # Check database
     if DATABASE_URL and project_id:
         try:
             from gateway.db import get_session, FileHashEntry
@@ -65,7 +67,7 @@ async def check_file_cache(
                         except Exception:
                             pass
 
-                    ref_msg = f"[FILE_REF:{content_hash[:12]}] (unchanged from previous request)"
+                    ref_msg = f"[FILE_REF:{content_hash[:12]}] (unchanged from previous request; call get_file_by_hash if you need the content)"
                     return True, content_hash, ref_msg
 
         except Exception as e:
@@ -84,10 +86,14 @@ async def store_file_hash(
     if not ENABLE_FILE_HASH_CACHE:
         return
 
+    # Store full content in Redis with longer TTL for retrieval
     if rds is not None:
         cache_key = f"filecache:{project_id or 'default'}:{content_hash}"
+        content_key = f"filecontent:{project_id or 'default'}:{content_hash}"
         try:
             rds.setex(cache_key, FILE_HASH_CACHE_TTL, "1")
+            # Store full content for retrieval (longer TTL for stable files)
+            rds.setex(content_key, FILE_HASH_CACHE_TTL * 2, content)
         except Exception as e:
             log.warning("File cache Redis store failed: %r", e)
 
@@ -110,12 +116,15 @@ async def store_file_hash(
                     entry.last_seen = datetime.utcnow()
                     if file_path:
                         entry.file_path = file_path
+                    # Store full content in DB for retrieval
+                    entry.full_content = content
                 else:
                     new_entry = FileHashEntry(
                         project_id=project_id,
                         file_path=file_path or "unknown",
                         content_hash=content_hash,
                         content_preview=content[:500],
+                        full_content=content,  # Store full content
                         char_count=len(content),
                         last_seen=datetime.utcnow(),
                     )
@@ -163,12 +172,70 @@ async def process_tool_result(
     return content
 
 
+async def get_file_by_hash(
+    project_id: Optional[int],
+    content_hash: str,
+) -> Optional[str]:
+    """
+    Retrieve full file content by hash. Used when model needs context after seeing FILE_REF placeholder.
+    """
+    if not ENABLE_FILE_HASH_CACHE:
+        return None
+    
+    # Try Redis first
+    if rds is not None:
+        content_key = f"filecontent:{project_id or 'default'}:{content_hash}"
+        try:
+            content = rds.get(content_key)
+            if content:
+                if isinstance(content, bytes):
+                    content = content.decode("utf-8", errors="ignore")
+                log.debug("Retrieved file content from Redis: %s chars", len(content))
+                return content
+        except Exception as e:
+            log.warning("File content Redis retrieval failed: %r", e)
+    
+    # Try database
+    if DATABASE_URL and project_id:
+        try:
+            from gateway.db import get_session, FileHashEntry
+            from sqlalchemy import select
+
+            async with get_session() as session:
+                query = select(FileHashEntry).where(
+                    FileHashEntry.project_id == project_id,
+                    FileHashEntry.content_hash == content_hash,
+                )
+                result = await session.execute(query)
+                entry = result.scalar_one_or_none()
+
+                if entry and hasattr(entry, 'full_content') and entry.full_content:
+                    log.debug("Retrieved file content from DB: %s chars", len(entry.full_content))
+                    # Warm Redis cache
+                    if rds is not None:
+                        try:
+                            rds.setex(
+                                f"filecontent:{project_id}:{content_hash}",
+                                FILE_HASH_CACHE_TTL * 2,
+                                entry.full_content,
+                            )
+                        except Exception:
+                            pass
+                    return entry.full_content
+
+        except Exception as e:
+            log.warning("File content DB retrieval failed: %r", e)
+    
+    return None
+
+
 async def get_file_cache_stats(project_id: Optional[int] = None) -> Dict[str, Any]:
     stats = {
         "enabled": ENABLE_FILE_HASH_CACHE,
         "ttl_seconds": FILE_HASH_CACHE_TTL,
-        "entries": 0,
-        "total_chars_saved": 0,
+        "unique_files": 0,
+        "total_chars_in_cache": 0,
+        "estimated_chars_saved": 0,  # Actual savings from not re-transmitting
     }
 
     if not DATABASE_URL:
@@ -179,6 +246,7 @@ async def get_file_cache_stats(project_id: Optional[int] = None) -> Dict[str, An
         from sqlalchemy import select, func
 
         async with get_session() as session:
+            # Count unique cached files
             query = select(
                 func.count(FileHashEntry.id),
                 func.sum(FileHashEntry.char_count),
@@ -189,8 +257,17 @@ async def get_file_cache_stats(project_id: Optional[int] = None) -> Dict[str, An
             result = await session.execute(query)
             row = result.one()
 
-            stats["entries"] = int(row[0] or 0)
-            stats["total_chars_saved"] = int(row[1] or 0)
+            unique_count = int(row[0] or 0)
+            total_chars = int(row[1] or 0)
+            
+            stats["unique_files"] = unique_count
+            stats["total_chars_in_cache"] = total_chars
+            
+            # Estimate savings: each file hit saves (char_count - short_ref_length)
+            # FILE_REF messages are ~80 chars; saved = total_chars - (unique_count * 80)
+            # But this is per-hit, so we need hit count. For now, estimate conservatively:
+            # If a file is cached, assume at least 1 additional hit (2x total) = total_chars saved
+            stats["estimated_chars_saved"] = total_chars if unique_count > 0 else 0
 
     except Exception as e:
         log.warning("Failed to get file cache stats: %r", e)
