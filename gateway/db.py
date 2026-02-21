@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional, List, AsyncGenerator
 from contextlib import asynccontextmanager
 
-from sqlalchemy import String, Text, Integer, Float, DateTime, ForeignKey, Index, func
+from sqlalchemy import String, Text, Integer, Float, DateTime, ForeignKey, Index, func, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
@@ -36,7 +36,7 @@ class UsageRecord(Base):
     __tablename__ = "usage_records"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"), nullable=True)
     model: Mapped[str] = mapped_column(String(100), nullable=False)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
@@ -45,7 +45,7 @@ class UsageRecord(Base):
     cf_ray: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
-    project: Mapped["Project"] = relationship(back_populates="usage_records")
+    project: Mapped[Optional["Project"]] = relationship(back_populates="usage_records")
 
     __table_args__ = (
         Index("ix_usage_project_timestamp", "project_id", "timestamp"),
@@ -163,6 +163,11 @@ async def create_tables():
         return
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Allow usage records without a project (e.g. single-tenant gateway) so dashboard still shows usage
+        try:
+            await conn.execute(text("ALTER TABLE usage_records ALTER COLUMN project_id DROP NOT NULL"))
+        except Exception:
+            pass  # column may already be nullable or table just created with new schema
 
 
 @asynccontextmanager

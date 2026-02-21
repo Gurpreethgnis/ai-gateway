@@ -449,6 +449,36 @@ async def openai_chat_completions(req: Request):
         except Exception as e:
             log.warning("Context pruning failed: %r", e)
 
+    # Anthropic requires every tool_result to follow an assistant message with tool_use.
+    # Pruning can leave the first message as user+tool_result only; strip such leading messages.
+    def _is_only_tool_result_blocks(content: Any) -> bool:
+        if not isinstance(content, list) or len(content) == 0:
+            return False
+        for block in content:
+            if not isinstance(block, dict):
+                return False
+            if block.get("type") == "text" and (block.get("text") or "").strip():
+                return False
+            is_tool_result = (
+                block.get("type") == "tool_result"
+                or "tool_use_id" in block
+                or "tool_result_for" in block
+            )
+            if not is_tool_result:
+                return False
+        return True
+
+    def drop_leading_tool_result_only_messages(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        msgs = list(msgs)
+        while msgs and msgs[0].get("role") == "user" and _is_only_tool_result_blocks(msgs[0].get("content")):
+            msgs.pop(0)
+        # After stripping, first message must still be user (Anthropic expects user first)
+        if msgs and msgs[0].get("role") != "user":
+            msgs.insert(0, {"role": "user", "content": "(conversation continues)"})
+        return msgs
+
+    aa_messages = drop_leading_tool_result_only_messages(aa_messages)
+
     if ENABLE_ANTHROPIC_CACHE_CONTROL and system_text and len(system_text) >= 1024:
         system_param = [{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}]
     else:
