@@ -764,7 +764,9 @@ async def openai_chat_completions(req: Request):
                             project_id, model,
                             final_usage.get("input_tokens", 0),
                             final_usage.get("output_tokens", 0),
-                            ray, False
+                            ray, False,
+                            final_usage.get("cache_read_input_tokens", 0),
+                            final_usage.get("cache_creation_input_tokens", 0)
                         )
 
                     finished = True
@@ -913,7 +915,11 @@ async def openai_chat_completions(req: Request):
         stream=False,
     )
 
-    await record_usage_to_db(project_id, model, input_tokens, output_tokens, ray, False)
+    await record_usage_to_db(
+        project_id, model, input_tokens, output_tokens, ray, False,
+        usage.get("cache_read_input_tokens", 0) if usage else 0,
+        usage.get("cache_creation_input_tokens", 0) if usage else 0
+    )
 
     if ENABLE_MEMORY_LAYER and project_id and out_text and len(out_text) > 200:
         try:
@@ -944,7 +950,10 @@ async def openai_chat_completions(req: Request):
     response = JSONResponse(content=resp_json)
     response.headers["X-Gateway"] = "claude-gateway"
     response.headers["X-Model-Source"] = "custom"
-    response.headers["X-Cache"] = "MISS"
+    
+    # Set cache status based on actual cache usage
+    cache_hit = usage and usage.get("cache_read_input_tokens", 0) > 0
+    response.headers["X-Cache"] = "HIT" if cache_hit else "MISS"
     response.headers["X-Reduction"] = "1"
     return response
 

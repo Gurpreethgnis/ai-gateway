@@ -206,6 +206,8 @@ async def record_usage_to_db(
     output_tokens: int,
     cf_ray: str,
     cached: bool,
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
 ):
     if not DATABASE_URL:
         return
@@ -217,6 +219,8 @@ async def record_usage_to_db(
                 project_id=project_id,
                 model=model,
                 input_tokens=input_tokens,
+                cache_read_input_tokens=cache_read_input_tokens,
+                cache_creation_input_tokens=cache_creation_input_tokens,
                 output_tokens=output_tokens,
                 cost_usd=cost,
                 cached=cached,

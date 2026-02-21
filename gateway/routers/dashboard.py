@@ -300,11 +300,18 @@ async def get_dashboard(request: Request):
 
             total_input = total_input or 0
             total_cost = total_cost or 0
-            total_cached = 0  # cache columns removed from schema
+            # Calculate cache efficiency and savings
+            cache_result = await session.execute(
+                select(func.sum(UsageRecord.cache_read_input_tokens))
+            )
+            total_cached = cache_result.scalar() or 0
             
-            total_processed = total_input
-            efficiency = 0
-            savings_usd = 0
+            total_processed = total_input + total_cached
+            efficiency = (total_cached / total_processed * 100) if total_processed > 0 else 0
+            
+            # Estimate savings: cached tokens cost less to process
+            cache_cost_savings = total_cached * 0.001 * 0.003  # rough estimate
+            savings_usd = cache_cost_savings
             
             active_connections = 0
             try:
@@ -323,8 +330,9 @@ async def get_dashboard(request: Request):
                 recent_rows = recent_q.scalars().all()
                 for r in recent_rows:
                     total_in = r.input_tokens or 0
-                    cache_r = 0  # cache column removed
-                    savings_pct = 0
+                    cache_r = r.cache_read_input_tokens or 0
+                    total_tokens = total_in + cache_r
+                    savings_pct = (cache_r / total_tokens * 100) if total_tokens > 0 else 0
                     
                     ts = "00:00:00"
                     if r.timestamp:
