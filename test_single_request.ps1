@@ -39,18 +39,21 @@ try {
 } catch {
     Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host ""
-    # Show response body when present (e.g. X-Debug: 1 returns error_type and error_message)
     $body = $_.ErrorDetails.Message
     if ($body) {
         Write-Host "Response body:" -ForegroundColor Yellow
         Write-Host $body -ForegroundColor Gray
-        $json = $body | ConvertFrom-Json -ErrorAction SilentlyContinue
-        if ($json.error_type) {
-            Write-Host ""
-            Write-Host "Fix: $($json.error_type) - $($json.error_message)" -ForegroundColor Cyan
+        try {
+            $json = $body | ConvertFrom-Json -ErrorAction Stop
+            if ($json.error_type) {
+                Write-Host ""
+                Write-Host "Fix: $($json.error_type) - $($json.error_message)" -ForegroundColor Cyan
+            }
+        } catch {
+            # Body is not JSON (e.g. "error code: 502" from proxy)
         }
     }
     Write-Host ""
-    Write-Host "To see the real server error, deploy then run: " -ForegroundColor Yellow
-    Write-Host "  `$env:GATEWAY_DEBUG = '1'; .\test_single_request.ps1" -ForegroundColor White
+    Write-Host "502 = upstream/Anthropic error or timeout. Check Railway logs for the real error." -ForegroundColor Yellow
+    Write-Host "To see gateway error in response: `$env:GATEWAY_DEBUG = '1'; .\test_single_request.ps1" -ForegroundColor Gray
 }

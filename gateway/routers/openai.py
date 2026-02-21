@@ -55,6 +55,7 @@ from gateway.token_reduction import (
 
 from gateway.rate_limit import check_rate_limit, get_rate_limit_headers
 from gateway.circuit_breaker import with_circuit_breaker, CircuitOpenError
+from gateway.concurrency import acquire_concurrency_slot, release_concurrency_slot
 from gateway.retry import with_retry, RetryExhaustedError
 from gateway.metrics import (
     record_request,
