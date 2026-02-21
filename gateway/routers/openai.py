@@ -366,7 +366,7 @@ async def openai_chat_completions(req: Request):
                             aa_messages.append({"role": "user", "content": anthropic_content})
                             continue
             flush_tool_results()
-            new_text, _meta = strip_or_truncate("user", content_text, LIMITS["user_msg_max"], allow_strip=False)
+            new_text, _meta = strip_or_truncate("user", content_text, LIMITS["user_msg_max"], allow_strip=True)
             if new_text:
                 user_join.append(new_text)
                 aa_messages.append({"role": "user", "content": new_text})
