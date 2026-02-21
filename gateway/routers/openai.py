@@ -486,6 +486,22 @@ async def openai_chat_completions(req: Request):
     else:
         system_param = system_text
 
+    if ENABLE_ANTHROPIC_CACHE_CONTROL and aa_messages:
+        # Anthropic allows up to 4 checkpoints. 1 used for system.
+        # We'll use up to 2 for the most recent user messages to capture growing context.
+        user_msgs_indices = [i for i, m in enumerate(aa_messages) if m.get("role") == "user"]
+        for idx in user_msgs_indices[-2:]:
+            msg = aa_messages[idx]
+            content = msg.get("content")
+            if isinstance(content, str):
+                if len(content) > 1024:
+                    msg["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+            elif isinstance(content, list) and content:
+                # Add cache control to the last block of the message
+                last_block = content[-1]
+                if isinstance(last_block, dict):
+                    last_block["cache_control"] = {"type": "ephemeral"}
+
     payload: Dict[str, Any] = {
         "model": model,
         "system": system_param,
