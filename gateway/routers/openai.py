@@ -181,6 +181,16 @@ async def openai_chat_completions(req: Request):
     last_assistant_tool_use_ids: List[str] = []
     tool_result_index_since_assistant: int = 0
     pending_tool_result_blocks: List[Dict[str, Any]] = []
+    gateway_tokens_saved = 0
+
+    def track_reduction(meta: Dict[str, Any]):
+        nonlocal gateway_tokens_saved
+        if meta.get("stripped") or meta.get("truncated"):
+            chars_saved = meta.get("before", 0) - meta.get("after", 0)
+            tokens_saved = chars_saved // 4
+            gateway_tokens_saved += tokens_saved
+            log.debug("Gateway reduction: %d chars -> %d tokens (total: %d)",
+                     chars_saved, tokens_saved, gateway_tokens_saved)
 
     def flush_tool_results():
         nonlocal tool_result_index_since_assistant, pending_tool_result_blocks
@@ -445,19 +455,6 @@ async def openai_chat_completions(req: Request):
     max_tokens = int(parsed.get("max_tokens") or DEFAULT_MAX_TOKENS)
     temperature = parsed.get("temperature") if parsed.get("temperature") is not None else 0.2
 
-    gateway_tokens_saved = 0
-    
-    # Track token reductions from stripping and truncation
-    def track_reduction(meta: Dict[str, Any]):
-        nonlocal gateway_tokens_saved
-        if meta.get("stripped") or meta.get("truncated"):
-            chars_saved = meta.get("before", 0) - meta.get("after", 0)
-            # Rough estimate: 4 chars per token
-            tokens_saved = chars_saved // 4
-            gateway_tokens_saved += tokens_saved
-            log.debug("Gateway reduction: %d chars -> %d tokens (total: %d)", 
-                     chars_saved, tokens_saved, gateway_tokens_saved)
-    
     if ENABLE_CONTEXT_PRUNING:
         try:
             from gateway.context_pruner import prune_context
@@ -498,26 +495,53 @@ async def openai_chat_completions(req: Request):
 
     aa_messages = drop_leading_tool_result_only_messages(aa_messages)
 
-    if ENABLE_ANTHROPIC_CACHE_CONTROL and system_text and len(system_text) >= 1024:
-        system_param = [{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}]
+    # Build system prompt with cacheable blocks for real cost savings
+    if ENABLE_ANTHROPIC_CACHE_CONTROL:
+        from gateway.platform_constitution import get_cacheable_system_blocks, VERSION as CONSTITUTION_VERSION
+        
+        system_blocks = []
+        
+        # Add cacheable constitution and diff-first rules
+        # These blocks form 70-80% of typical prompts and cost ~10% on cache hits
+        if system_text and len(system_text) >= 1024:
+            system_blocks.extend(get_cacheable_system_blocks(
+                include_constitution=True,
+                include_diff_rules=True
+            ))
+            
+            # Add dynamic per-request system text (not cached)
+            system_blocks.append({
+                "type": "text",
+                "text": system_text
+            })
+        elif system_text:
+            # Short system text - just send as-is
+            system_blocks.append({
+                "type": "text",
+                "text": system_text
+            })
+        
+        system_param = system_blocks if system_blocks else system_text
     else:
         system_param = system_text
 
     if ENABLE_ANTHROPIC_CACHE_CONTROL and aa_messages:
-        # Anthropic allows up to 4 checkpoints. 1 used for system.
-        # We'll use up to 2 for the most recent user messages to capture growing context.
+        # Anthropic allows up to 4 checkpoints. 1-2 used for system blocks.
+        # Use remaining checkpoints for recent user messages to capture growing context.
         user_msgs_indices = [i for i, m in enumerate(aa_messages) if m.get("role") == "user"]
         for idx in user_msgs_indices[-2:]:
             msg = aa_messages[idx]
             content = msg.get("content")
             if isinstance(content, str):
-                if len(content) > 1024:
+                if len(content) > 2048:  # Only cache substantial messages
                     msg["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
             elif isinstance(content, list) and content:
                 # Add cache control to the last block of the message
                 last_block = content[-1]
-                if isinstance(last_block, dict):
-                    last_block["cache_control"] = {"type": "ephemeral"}
+                if isinstance(last_block, dict) and last_block.get("type") == "text":
+                    text_len = len(last_block.get("text", ""))
+                    if text_len > 2048:  # Only cache substantial content
+                        last_block["cache_control"] = {"type": "ephemeral"}
 
     payload: Dict[str, Any] = {
         "model": model,

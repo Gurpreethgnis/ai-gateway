@@ -1,6 +1,18 @@
 import json
 from typing import Any, Dict, List, Optional, Union
 
+def _sort_schema_keys(schema: Any) -> Any:
+    """
+    Recursively sort dict keys for deterministic JSON serialization.
+    This ensures identical tool schemas produce identical cache keys.
+    """
+    if isinstance(schema, dict):
+        return {k: _sort_schema_keys(v) for k, v in sorted(schema.items())}
+    elif isinstance(schema, list):
+        return [_sort_schema_keys(item) for item in schema]
+    else:
+        return schema
+
 def oa_tools_from_body(parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
     tools = []
     if isinstance(parsed.get("tools"), list):
@@ -28,7 +40,15 @@ def anthropic_tools_from_openai(tools: List[Dict[str, Any]]) -> List[Dict[str, A
         params = fn.get("parameters") or fn.get("input_schema") or {"type": "object", "properties": {}}
         if not isinstance(params, dict):
             params = {"type": "object", "properties": {}}
-        out.append({"name": name, "description": desc, "input_schema": params})
+        
+        # Sort input_schema keys for cache key stability
+        sorted_params = _sort_schema_keys(params)
+        
+        out.append({"name": name, "description": desc, "input_schema": sorted_params})
+    
+    # Sort tools by name for deterministic ordering
+    out.sort(key=lambda tool: tool.get("name", ""))
+    
     return out
 
 def anthropic_tool_choice_from_openai(tool_choice: Any) -> Optional[Dict[str, Any]]:
