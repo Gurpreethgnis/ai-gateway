@@ -172,6 +172,20 @@ async def create_tables():
         except Exception:
             pass  # column may already be nullable or table just created with new schema
         
+        # Add missing columns if they don't exist
+        try:
+            await conn.execute(text("ALTER TABLE usage_records ADD COLUMN cache_read_input_tokens INTEGER"))
+        except Exception:
+            pass  # column may already exist
+        try:
+            await conn.execute(text("ALTER TABLE usage_records ADD COLUMN cache_creation_input_tokens INTEGER"))
+        except Exception:
+            pass  # column may already exist
+        try:
+            await conn.execute(text("ALTER TABLE usage_records ADD COLUMN gateway_tokens_saved INTEGER"))
+        except Exception:
+            pass  # column may already exist
+            
         # Make cache-related columns nullable if they exist
         try:
             await conn.execute(text("ALTER TABLE usage_records ALTER COLUMN cache_read_input_tokens DROP NOT NULL"))

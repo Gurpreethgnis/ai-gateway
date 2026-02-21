@@ -334,10 +334,15 @@ async def get_dashboard(request: Request):
             total_cached = cache_result.scalar() or 0
             
             # Calculate gateway savings (pruning, stripping, etc.)
-            gateway_result = await session.execute(
-                select(func.sum(UsageRecord.gateway_tokens_saved))
-            )
-            total_gateway_saved = gateway_result.scalar() or 0
+            total_gateway_saved = 0
+            try:
+                gateway_result = await session.execute(
+                    select(func.sum(UsageRecord.gateway_tokens_saved))
+                )
+                total_gateway_saved = gateway_result.scalar() or 0
+            except Exception:
+                # Column may not exist yet in older databases
+                total_gateway_saved = 0
             
             total_processed = total_input + total_cached + total_gateway_saved
             efficiency = ((total_cached + total_gateway_saved) / total_processed * 100) if total_processed > 0 else 0
@@ -364,8 +369,8 @@ async def get_dashboard(request: Request):
                 recent_rows = recent_q.scalars().all()
                 for r in recent_rows:
                     total_in = r.input_tokens or 0
-                    cache_r = r.cache_read_input_tokens or 0
-                    gateway_saved = r.gateway_tokens_saved or 0
+                    cache_r = getattr(r, 'cache_read_input_tokens', 0) or 0
+                    gateway_saved = getattr(r, 'gateway_tokens_saved', 0) or 0
                     total_tokens = total_in + cache_r + gateway_saved
                     savings_pct = ((cache_r + gateway_saved) / total_tokens * 100) if total_tokens > 0 else 0
                     
