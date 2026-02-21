@@ -190,6 +190,9 @@ async def record_usage_to_db(
     cf_ray: str,
     cached: bool,
 ):
+    if not DATABASE_URL:
+        return
+    
     try:
         cost = calculate_cost(model, input_tokens, output_tokens)
         async with get_session() as session:
@@ -203,6 +206,7 @@ async def record_usage_to_db(
                 cf_ray=cf_ray,
             )
             session.add(record)
+            await session.commit()
     except Exception as e:
         import logging
         logging.getLogger("gateway").warning("record_usage_to_db failed: %r", e)

@@ -90,38 +90,6 @@ async def get_project_context(request: Request) -> tuple[Optional[int], Optional
     return None, None, 60
 
 
-async def record_usage_to_db(
-    project_id: Optional[int],
-    model: str,
-    input_tokens: int,
-    output_tokens: int,
-    cf_ray: str,
-    cached: bool,
-):
-    if not DATABASE_URL or not project_id:
-        return
-
-    try:
-        from gateway.db import get_session, UsageRecord, calculate_cost as calc_cost
-
-        cost = calc_cost(model, input_tokens, output_tokens)
-
-        async with get_session() as session:
-            record = UsageRecord(
-                project_id=project_id,
-                model=model,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cost_usd=cost,
-                cached=cached,
-                cf_ray=cf_ray,
-            )
-            session.add(record)
-
-    except Exception as e:
-        log.warning("Failed to record usage: %r", e)
-
-
 def normalize_request_body(parsed: Dict[str, Any]) -> Dict[str, Any]:
     """Convert various OpenAI API formats to Chat Completions format."""
     if "messages" in parsed:
@@ -554,6 +522,7 @@ async def openai_chat_completions(req: Request):
             include_usage = True
 
         async def sse_stream():
+            nonlocal model
             stream_t0 = time.time()
             chunk_id = f"chatcmpl_{hashlib.sha1((ray + str(time.time())).encode()).hexdigest()[:16]}"
             created = int(time.time())
