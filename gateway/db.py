@@ -147,15 +147,20 @@ async_session_factory = None
 
 def init_db():
     global engine, async_session_factory
-    if not DATABASE_URL:
+    
+    # Try common database URL names for various hosting providers
+    db_url = DATABASE_URL or os.getenv("POSTGRES_URL") or os.getenv("DATABASE_PRIVATE_URL") or os.getenv("INTERNAL_DATABASE_URL")
+    
+    if not db_url:
+        log.warning("DATABASE_URL is not set. Database features will be disabled.")
         return
     
-    db_url = DATABASE_URL
     if db_url.startswith("postgres://"):
         db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
     elif db_url.startswith("postgresql://"):
         db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
     
+    log.info("Initializing database with URL: %s", db_url.split("@")[-1]) # Log only host for safety
     engine = create_async_engine(db_url, echo=False, pool_pre_ping=True)
     async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -196,8 +201,15 @@ async def run_migrations():
 
 @asynccontextmanager
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
+    global async_session_factory
     if async_session_factory is None:
-        raise RuntimeError("Database not initialized. Set DATABASE_URL.")
+        log.info("Lazy-initializing database session factory...")
+        init_db()
+        
+    if async_session_factory is None:
+        db_var_status = "SET" if (DATABASE_URL or os.getenv("POSTGRES_URL")) else "NOT SET"
+        raise RuntimeError(f"Database not initialized. DATABASE_URL is {db_var_status}.")
+        
     async with async_session_factory() as session:
         try:
             yield session
