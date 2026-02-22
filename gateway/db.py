@@ -158,7 +158,20 @@ def init_db():
     elif db_url.startswith("postgresql://"):
         db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
     
-    engine = create_async_engine(db_url, echo=False, pool_pre_ping=True)
+    engine = create_async_engine(
+        db_url,
+        echo=False,
+        pool_pre_ping=True,
+        pool_size=10,
+        max_overflow=5,
+        pool_timeout=10,
+        pool_recycle=300,
+        connect_args={
+            "server_settings": {
+                "statement_timeout": "8000"
+            }
+        }
+    )
     async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

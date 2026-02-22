@@ -4,6 +4,7 @@ from sqlalchemy import select, func
 from gateway.db import get_session, UsageRecord, Project
 from gateway.security import extract_gateway_api_key
 import json
+import asyncio
 from datetime import datetime, timedelta
 
 router = APIRouter()
@@ -187,12 +188,12 @@ DASHBOARD_HTML = """
             </div>
             <div class="card">
                 <span class="card-label">Efficiency Ratio</span>
-                <div class="card-value">{{ efficiency }}%</div>
+                <div class="card-value">{{ efficiency }}</div>
                 <div class="card-sub">Tokens Saved</div>
             </div>
             <div class="card">
                 <span class="card-label">Estimated Savings</span>
-                <div class="card-value">${{ savings_usd }}</div>
+                <div class="card-value">{{ savings_usd }}</div>
                 <div class="card-sub">USD Predicted</div>
             </div>
             <div class="card">
@@ -276,12 +277,57 @@ async def get_dashboard(request: Request, refresh: bool = False, full: bool = Fa
     # 1. Try Cache First (unless refresh=True)
     mode_label = "full" if full else "lite"
     cache_key = f"dashboard_html_{mode_label}_v3"
+    lock_key = f"dashboard_building_{mode_label}"
     
     if rds and not refresh:
         try:
             cached_html = rds.get(cache_key)
             if cached_html:
                 return HTMLResponse(content=cached_html)
+            
+            # Check if another request is building the cache
+            building = rds.get(lock_key)
+            if building:
+                # Wait up to 3 seconds for the cache to appear
+                for _ in range(6):
+                    await asyncio.sleep(0.5)
+                    cached_html = rds.get(cache_key)
+                    if cached_html:
+                        return HTMLResponse(content=cached_html)
+                # If still not ready, return loading page
+                return HTMLResponse(content="""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="refresh" content="3">
+    <title>Loading Dashboard...</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+        .box { background: #1e293b; border: 1px solid #334155; border-radius: 1rem; padding: 2.5rem; max-width: 520px; text-align: center; }
+        h1 { font-size: 1.5rem; margin-bottom: 0.5rem; color: #38bdf8; }
+        p { color: #94a3b8; line-height: 1.6; }
+        .spinner { border: 4px solid #334155; border-top: 4px solid #38bdf8; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 1.5rem auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h1>Loading Dashboard...</h1>
+        <div class="spinner"></div>
+        <p>Computing analytics. This page will refresh automatically.</p>
+    </div>
+</body>
+</html>
+""", status_code=200)
+        except Exception:
+            pass
+    
+    # Set building lock
+    if rds:
+        try:
+            rds.setex(lock_key, 10, "1")
         except Exception:
             pass
 
@@ -320,7 +366,7 @@ async def get_dashboard(request: Request, refresh: bool = False, full: bool = Fa
 </html>
 """, status_code=200)
 
-    try:
+    async def build_dashboard():
         async with get_session() as session:
             # Aggregates - Lite (24h) or Full (90d)
             if full:
@@ -332,49 +378,30 @@ async def get_dashboard(request: Request, refresh: bool = False, full: bool = Fa
                 
             window = datetime.utcnow() - timedelta(days=window_days)
             
+            # COMBINED QUERY - All aggregates in one shot
             try:
-                # Total input and cost for window
-                total_q = await session.execute(
+                combined_q = await session.execute(
                     select(
                         func.sum(UsageRecord.input_tokens),
-                        func.sum(UsageRecord.cost_usd)
+                        func.sum(UsageRecord.cost_usd),
+                        func.sum(UsageRecord.cache_read_input_tokens),
+                        func.sum(UsageRecord.gateway_tokens_saved),
                     ).where(UsageRecord.timestamp >= window)
                 )
-                result = total_q.fetchone()
+                result = combined_q.fetchone()
                 if result:
-                    total_input, total_cost = result
+                    total_input, total_cost, total_cached, total_gateway_saved = result
                 else:
-                    total_input, total_cost = 0, 0
+                    total_input, total_cost, total_cached, total_gateway_saved = 0, 0, 0, 0
             except Exception as e:
                 import logging
-                logging.getLogger("gateway").error("Dashboard aggregate query failed: %r", e)
-                total_input, total_cost = 0, 0
+                logging.getLogger("gateway").error("Dashboard combined query failed: %r", e)
+                total_input, total_cost, total_cached, total_gateway_saved = 0, 0, 0, 0
 
             total_input = total_input or 0
             total_cost = total_cost or 0
-            
-            # Calculate cache efficiency and savings for window
-            total_cached = 0
-            try:
-                cache_result = await session.execute(
-                    select(func.sum(UsageRecord.cache_read_input_tokens))
-                    .where(UsageRecord.timestamp >= window)
-                )
-                total_cached = cache_result.scalar() or 0
-            except Exception as e:
-                import logging
-                logging.getLogger("gateway").error("Dashboard cache query failed: %r", e)
-            
-            # Calculate gateway savings for window
-            total_gateway_saved = 0
-            try:
-                gateway_result = await session.execute(
-                    select(func.sum(UsageRecord.gateway_tokens_saved))
-                    .where(UsageRecord.timestamp >= window)
-                )
-                total_gateway_saved = gateway_result.scalar() or 0
-            except Exception:
-                total_gateway_saved = 0
+            total_cached = total_cached or 0
+            total_gateway_saved = total_gateway_saved or 0
             
             total_processed = total_input + total_cached + total_gateway_saved
             efficiency = ((total_cached + total_gateway_saved) / total_processed * 100) if total_processed > 0 else 0
@@ -422,30 +449,30 @@ async def get_dashboard(request: Request, refresh: bool = False, full: bool = Fa
                 import logging
                 logging.getLogger("gateway").error("Dashboard recent rows query failed: %r", e)
 
-        html = DASHBOARD_HTML
-        html = html.replace("{{ total_input }}", f"{total_input:,}")
-        html = html.replace("{{ total_cached }}", f"{total_cached:,}")
-        html = html.replace("{{ total_gateway_saved }}", f"{total_gateway_saved:,}")
-        html = html.replace("{{ efficiency }}", f"{efficiency:.1f}%")
-        html = html.replace("{{ savings_usd }}", f"${savings_usd:.4f}")
-        html = html.replace("{{ active_connections }}", str(active_connections))
-        
-        # UI Additions for Mode
-        mode_btn_html = ""
-        if full:
-            mode_btn_html = '<button class="refresh-btn" style="background: var(--bg); color: var(--text); border: 1px solid var(--border); margin-right: 0.5rem;" onclick="window.location.href=\'/dashboard\'">Switch to Lite View</button>'
-        else:
-            mode_btn_html = '<button class="refresh-btn" style="background: var(--accent); color: white; margin-right: 0.5rem;" onclick="window.location.href=\'/dashboard?full=True\'">Load 90-Day Analytics</button>'
+            html = DASHBOARD_HTML
+            html = html.replace("{{ total_input }}", f"{total_input:,}")
+            html = html.replace("{{ total_cached }}", f"{total_cached:,}")
+            html = html.replace("{{ total_gateway_saved }}", f"{total_gateway_saved:,}")
+            html = html.replace("{{ efficiency }}", f"{efficiency:.1f}%")
+            html = html.replace("{{ savings_usd }}", f"${savings_usd:.4f}")
+            html = html.replace("{{ active_connections }}", str(active_connections))
             
-        html = html.replace('<button class="refresh-btn" onclick="window.location.href=\'/dashboard?refresh=True\'">Refresh Data</button>', 
-                            f'{mode_btn_html}<button class="refresh-btn" onclick="window.location.href=\'/dashboard?refresh=True&full={full}\'">Refresh Data</button>')
-        
-        html = html.replace("Real-time Claude token savings dashboard", f"Real-time Claude token savings dashboard | <strong>{view_name}</strong>")
+            # UI Additions for Mode
+            mode_btn_html = ""
+            if full:
+                mode_btn_html = '<button class="refresh-btn" style="background: var(--bg); color: var(--text); border: 1px solid var(--border); margin-right: 0.5rem;" onclick="window.location.href=\'/dashboard\'">Switch to Lite View</button>'
+            else:
+                mode_btn_html = '<button class="refresh-btn" style="background: var(--accent); color: white; margin-right: 0.5rem;" onclick="window.location.href=\'/dashboard?full=True\'">Load 90-Day Analytics</button>'
+                
+            html = html.replace('<button class="refresh-btn" onclick="window.location.href=\'/dashboard?refresh=True\'">Refresh Data</button>', 
+                                f'{mode_btn_html}<button class="refresh-btn" onclick="window.location.href=\'/dashboard?refresh=True&full={full}\'">Refresh Data</button>')
+            
+            html = html.replace("Real-time Claude token savings dashboard", f"Real-time Claude token savings dashboard | <strong>{view_name}</strong>")
 
-        rows_html = ""
-        for r in processed_recent:
-            badge = '<span class="badge badge-cached">CACHED</span>' if r["cache_read"] > 0 else '<span class="badge badge-miss">MISS</span>'
-            rows_html += f"""
+            rows_html = ""
+            for r in processed_recent:
+                badge = '<span class="badge badge-cached">CACHED</span>' if r["cache_read"] > 0 else '<span class="badge badge-miss">MISS</span>'
+                rows_html += f"""
             <tr>
                 <td>{r['timestamp']}</td>
                 <td style="font-family: monospace; font-size: 0.75rem;">{r['model']}</td>
@@ -457,31 +484,112 @@ async def get_dashboard(request: Request, refresh: bool = False, full: bool = Fa
                 <td>{r['savings_pct']}%</td>
             </tr>
             """
-        
-        parts_for = html.split('{% for row in recent %}')
-        parts_end = html.split('{% endfor %}')
-        
-        if len(parts_for) > 1 and len(parts_end) > 1:
-            final_html = parts_for[0] + rows_html + parts_end[1]
-        else:
-            final_html = html 
             
+            parts_for = html.split('{% for row in recent %}')
+            parts_end = html.split('{% endfor %}')
+            
+            if len(parts_for) > 1 and len(parts_end) > 1:
+                final_html = parts_for[0] + rows_html + parts_end[1]
+            else:
+                final_html = html 
+                
+            return final_html
+
+    try:
+        # Wrap with timeout
+        final_html = await asyncio.wait_for(build_dashboard(), timeout=7.0)
+        
         # Cache for 60s (Lite) or 300s (Full)
         ttl = 300 if full else 60
         if rds:
             try:
                 rds.setex(cache_key, ttl, final_html)
+                rds.delete(lock_key)
             except Exception:
                 pass
 
         return HTMLResponse(content=final_html)
 
+    except asyncio.TimeoutError:
+        import logging
+        logging.getLogger("gateway").error("Dashboard build timed out after 7s")
+        
+        # Clear building lock
+        if rds:
+            try:
+                rds.delete(lock_key)
+            except Exception:
+                pass
+        
+        # Return loading page with auto-refresh
+        return HTMLResponse(
+            content="""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="refresh" content="5">
+    <title>Dashboard Loading...</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+        .box { background: #1e293b; border: 1px solid #334155; border-radius: 1rem; padding: 2.5rem; max-width: 520px; text-align: center; }
+        h1 { font-size: 1.5rem; margin-bottom: 0.5rem; color: #f59e0b; }
+        p { color: #94a3b8; line-height: 1.6; }
+        .spinner { border: 4px solid #334155; border-top: 4px solid #f59e0b; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 1.5rem auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .btn { background: #38bdf8; color: #000; border: none; padding: 0.5rem 1rem; border-radius: 0.5rem; font-weight: 600; cursor: pointer; margin-top: 1rem; text-decoration: none; display: inline-block; }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h1>⏱️ Dashboard Taking Longer Than Expected</h1>
+        <div class="spinner"></div>
+        <p>Your dashboard is computing analytics over a large dataset. This page will auto-refresh in 5 seconds.</p>
+        <p style="font-size: 0.875rem; margin-top: 1rem;">If this persists, try the <a href="/dashboard" class="btn">Lite View (24h)</a> for faster results.</p>
+    </div>
+</body>
+</html>
+""",
+            status_code=200
+        )
     except Exception as e:
         import traceback
         err_msg = traceback.format_exc()
         import logging
         logging.getLogger("gateway").error("CRITICAL DASHBOARD ERROR: %s", err_msg)
+        
+        # Clear building lock
+        if rds:
+            try:
+                rds.delete(lock_key)
+            except Exception:
+                pass
+        
         return HTMLResponse(
-            content=f"<html><body style='background:#0f172a;color:white;padding:2rem;font-family:sans-serif;'><h1>Dashboard Error</h1><p>The aggregation took too long or failed.</p><button onclick='window.location.href=\"/dashboard\"' style='background:var(--primary);padding:0.5rem 1rem;border-radius:0.5rem;cursor:pointer;'>Go Back to Lite View</button><pre style='color:#94a3b8;margin-top:1rem;'>{err_msg}</pre></body></html>",
+            content=f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Dashboard Error</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {{ font-family: 'Inter', sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; }}
+        .box {{ background: #1e293b; border: 1px solid #334155; border-radius: 1rem; padding: 2rem; max-width: 800px; margin: 0 auto; }}
+        h1 {{ color: #ef4444; margin-bottom: 1rem; }}
+        .btn {{ background: #38bdf8; color: #000; padding: 0.5rem 1rem; border-radius: 0.5rem; text-decoration: none; display: inline-block; margin-top: 1rem; }}
+        pre {{ color: #94a3b8; background: #0f172a; padding: 1rem; border-radius: 0.5rem; overflow-x: auto; font-size: 0.75rem; }}
+    </style>
+</head>
+<body>
+    <div class="box">
+        <h1>⚠️ Dashboard Error</h1>
+        <p>The dashboard encountered an error. Try the <a href="/dashboard" class="btn">Lite View</a> for faster results.</p>
+        <pre>{err_msg}</pre>
+    </div>
+</body>
+</html>
+""",
             status_code=500
         )

@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import RedirectResponse
 
 from gateway.logging_setup import (
     setup_logging,
@@ -60,6 +61,10 @@ app.middleware("http")(request_log_middleware)
 app.middleware("http")(security_middleware)
 
 # routes
+@app.get("/")
+async def root():
+    return RedirectResponse(url="/dashboard", status_code=302)
+
 app.include_router(health_router)
 app.include_router(chat_router)
 app.include_router(openai_router)

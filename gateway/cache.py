@@ -13,7 +13,12 @@ except Exception:
 rds = None
 if REDIS_URL and redis is not None:
     try:
-        rds = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        rds = redis.Redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_timeout=3,
+            socket_connect_timeout=3
+        )
         rds.ping()
     except Exception as e:
         log.warning("Redis disabled: %r", e)
