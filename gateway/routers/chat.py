@@ -48,11 +48,44 @@ async def chat(req: Request, body: ChatReq):
     ray = req.headers.get("cf-ray") or ""
     t0 = time.time()
 
+    # Explicit provider request
     if body.provider == "local":
         return await _handle_local_provider(body, ray)
-
-    joined_user = "\n".join(m.content for m in body.messages if m.role == "user")
-    model = route_model_from_messages(joined_user, body.model)
+    
+    # Smart routing when no explicit provider
+    if not body.provider and body.model in (None, "auto", "smartroute"):
+        try:
+            from gateway.smart_routing import route_request
+            from gateway.config import ENABLE_SMART_ROUTING
+            
+            if ENABLE_SMART_ROUTING:
+                messages = [{"role": m.role, "content": m.content} for m in body.messages]
+                decision = await route_request(
+                    messages=messages,
+                    tools=[],  # Simple chat endpoint doesn't support tools
+                    project_id=None,
+                    explicit_model=body.model,
+                    system_prompt=body.system or ""
+                )
+                
+                if decision.provider == "local":
+                    log.info("CHAT smart routing -> LOCAL (tier=%s, phase=%s)", decision.tier, decision.phase)
+                    return await _handle_local_provider(body, ray)
+                
+                # Use Claude with selected model
+                model = decision.model
+                log.info("CHAT smart routing -> %s (tier=%s, phase=%s)", model, decision.tier, decision.phase)
+            else:
+                joined_user = "\n".join(m.content for m in body.messages if m.role == "user")
+                model = route_model_from_messages(joined_user, body.model)
+        except Exception as e:
+            log.warning("CHAT smart routing failed: %r, using fallback", e)
+            joined_user = "\n".join(m.content for m in body.messages if m.role == "user")
+            model = route_model_from_messages(joined_user, body.model)
+    else:
+        # Explicit model or provider specified
+        joined_user = "\n".join(m.content for m in body.messages if m.role == "user")
+        model = route_model_from_messages(joined_user, body.model)
 
     payload = {
         "model": model,

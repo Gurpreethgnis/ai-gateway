@@ -8,16 +8,33 @@ from gateway.config import (
     DEFAULT_MODEL,
     OPUS_MODEL,
     DATABASE_URL,
+    SMART_ROUTING_MODE,
+    LOCAL_CONTEXT_CHAR_LIMIT,
 )
 from gateway.logging_setup import log
 
 
 @dataclass
 class RoutingDecision:
-    model: str
+    provider: str        # "local" | "anthropic"
+    model: str           # resolved model name
+    tier: str            # "local" | "sonnet" | "opus"
     score: float
     reasons: List[str]
-    is_opus: bool
+    phase: str           # "explicit" | "heuristic" | "llm_classifier"
+    
+    # Backward compatibility properties
+    @property
+    def is_opus(self) -> bool:
+        return self.tier == "opus"
+
+
+@dataclass
+class RoutingSignals:
+    band: str            # "LOCAL" | "CLAUDE" | "AMBIGUOUS"
+    confidence: float    # 0.0-1.0
+    reasons: List[str]
+    fallback_tier: str   # "local" | "sonnet" | "opus" - used if ambiguous and Phase 2 fails
 
 
 OPUS_KEYWORDS = [
@@ -55,6 +72,408 @@ SONNET_KEYWORDS = [
     ("comment", -0.08),
     ("rename", -0.08),
 ]
+
+
+# =============================================================================
+# Phase 1: Fast Heuristics (< 1ms)
+# =============================================================================
+
+LOCAL_TASK_PATTERNS = [
+    "explain", "summarize", "translate", "comment", "format", "rename",
+    "typo", "lint", "type hint", "docstring", "boilerplate", "snippet",
+    "what does", "how do i", "what is", "can you explain", "help me understand",
+    "add comment", "fix formatting", "add type hints", "generate docstring",
+]
+
+CLAUDE_DEEP_REASONING_KEYWORDS = [
+    "architect", "architecture", "migrate", "migration", "security audit",
+    "incident", "postmortem", "distributed system", "breaking change",
+    "backwards compat", "production deployment", "system design",
+    "scalability", "infrastructure", "kubernetes", "terraform",
+]
+
+
+def compute_routing_signals(
+    messages: List[Dict[str, Any]],
+    tools: List[Dict[str, Any]],
+    system_prompt: str = "",
+) -> RoutingSignals:
+    """
+    Phase 1: Fast heuristic-based classification.
+    Returns LOCAL, CLAUDE, or AMBIGUOUS with confidence and reasons.
+    """
+    text = extract_text_from_messages(messages)
+    text_lower = text.lower()
+    total_chars = len(text)
+    reasons = []
+    
+    # ========== FORCE CLAUDE (high confidence) ==========
+    
+    # Tools/functions present - local can't handle tool calls
+    if tools:
+        return RoutingSignals(
+            band="CLAUDE",
+            confidence=1.0,
+            reasons=["tools_present"],
+            fallback_tier="sonnet"
+        )
+    
+    # Check for tool_result blocks in messages
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    return RoutingSignals(
+                        band="CLAUDE",
+                        confidence=1.0,
+                        reasons=["tool_result_blocks"],
+                        fallback_tier="sonnet"
+                    )
+    
+    # Very long context exceeds local model capacity
+    if total_chars > LOCAL_CONTEXT_CHAR_LIMIT:
+        return RoutingSignals(
+            band="CLAUDE",
+            confidence=1.0,
+            reasons=[f"long_context:{total_chars}>{LOCAL_CONTEXT_CHAR_LIMIT}"],
+            fallback_tier="sonnet"
+        )
+    
+    # Long conversation (> 15 turns) indicates agentic session
+    if len(messages) > 15:
+        return RoutingSignals(
+            band="CLAUDE",
+            confidence=0.95,
+            reasons=[f"long_conversation:{len(messages)}_turns"],
+            fallback_tier="sonnet"
+        )
+    
+    # System prompt contains Cursor/Continue agent markers
+    system_lower = system_prompt.lower()
+    agent_markers = ["cursor", "continue", "coding agent", "ide assistant", "code editor"]
+    if any(marker in system_lower for marker in agent_markers):
+        if len(system_prompt) > 1000:
+            return RoutingSignals(
+                band="CLAUDE",
+                confidence=0.9,
+                reasons=["agentic_system_prompt"],
+                fallback_tier="sonnet"
+            )
+    
+    # Deep reasoning keywords (architecture, security, etc.)
+    deep_keywords_found = []
+    for keyword in CLAUDE_DEEP_REASONING_KEYWORDS:
+        if keyword in text_lower:
+            deep_keywords_found.append(keyword)
+    
+    if len(deep_keywords_found) >= 2:
+        return RoutingSignals(
+            band="CLAUDE",
+            confidence=0.9,
+            reasons=[f"deep_reasoning:{','.join(deep_keywords_found[:3])}"],
+            fallback_tier="opus"
+        )
+    
+    # Multiple file references (> 5 files)
+    file_refs = re.findall(r"(?:\.py|\.js|\.ts|\.tsx|\.go|\.rs|\.java|\.cpp|\.c|\.h)\b", text)
+    if len(file_refs) > 5:
+        return RoutingSignals(
+            band="CLAUDE",
+            confidence=0.85,
+            reasons=[f"many_files:{len(file_refs)}"],
+            fallback_tier="sonnet"
+        )
+    
+    # Multi-file change requests
+    multi_file_indicators = ["across multiple files", "in all files", "every file", "all the files"]
+    if any(indicator in text_lower for indicator in multi_file_indicators):
+        return RoutingSignals(
+            band="CLAUDE",
+            confidence=0.85,
+            reasons=["multi_file_request"],
+            fallback_tier="sonnet"
+        )
+    
+    # ========== FAVOR LOCAL (high confidence) ==========
+    
+    # Very short, simple request
+    if len(messages) == 1 and total_chars < 3000:
+        # Check for simple task patterns
+        simple_patterns_found = []
+        for pattern in LOCAL_TASK_PATTERNS:
+            if pattern in text_lower:
+                simple_patterns_found.append(pattern)
+        
+        if simple_patterns_found:
+            # No system prompt or very short system prompt
+            if not system_prompt or len(system_prompt) < 500:
+                return RoutingSignals(
+                    band="LOCAL",
+                    confidence=0.9,
+                    reasons=[f"simple_task:{simple_patterns_found[0]}", "short_context"],
+                    fallback_tier="local"
+                )
+    
+    # Single-file, simple edit request
+    single_file_simple = [
+        "add a comment", "fix the typo", "rename this", "format this",
+        "add type hints", "generate docstring", "explain this code",
+        "what does this do", "how does this work",
+    ]
+    if any(pattern in text_lower for pattern in single_file_simple):
+        if len(file_refs) <= 1:
+            return RoutingSignals(
+                band="LOCAL",
+                confidence=0.85,
+                reasons=["simple_single_file_edit"],
+                fallback_tier="local"
+            )
+    
+    # ========== AMBIGUOUS (route to Phase 2) ==========
+    
+    # Some signals favor local
+    local_score = 0.0
+    if total_chars < 5000:
+        local_score += 0.3
+        reasons.append("moderate_context")
+    
+    if len(messages) <= 3:
+        local_score += 0.2
+        reasons.append("short_conversation")
+    
+    # Some signals favor Claude
+    claude_score = 0.0
+    if len(deep_keywords_found) == 1:
+        claude_score += 0.4
+        reasons.append(f"some_complexity:{deep_keywords_found[0]}")
+    
+    if len(file_refs) > 1:
+        claude_score += 0.3
+        reasons.append(f"multiple_files:{len(file_refs)}")
+    
+    code_blocks = text.count("```")
+    if code_blocks > 2:
+        claude_score += 0.2
+        reasons.append(f"code_blocks:{code_blocks}")
+    
+    # Determine fallback based on score difference
+    if local_score > claude_score:
+        fallback = "local"
+    elif claude_score > local_score + 0.3:
+        fallback = "sonnet"
+    else:
+        fallback = "sonnet"  # Default to sonnet when truly ambiguous
+    
+    return RoutingSignals(
+        band="AMBIGUOUS",
+        confidence=abs(local_score - claude_score) / 2.0,  # Lower confidence when scores are close
+        reasons=reasons or ["no_strong_signals"],
+        fallback_tier=fallback
+    )
+
+
+# =============================================================================
+# Phase 2 Integration & Main Entry Point
+# =============================================================================
+
+async def route_request(
+    messages: List[Dict[str, Any]],
+    tools: List[Dict[str, Any]],
+    project_id: Optional[int] = None,
+    explicit_model: Optional[str] = None,
+    system_prompt: str = "",
+) -> RoutingDecision:
+    """
+    Main routing entry point for Smart Routing v2.
+    
+    Orchestrates:
+    1. Explicit model/provider checks
+    2. Phase 1: Fast heuristics
+    3. Phase 2: LLM classification (if ambiguous)
+    4. Final decision with provider + model
+    
+    Args:
+        messages: conversation messages
+        tools: tool/function definitions
+        project_id: optional project ID for historical scoring
+        explicit_model: explicit model request (e.g., "opus", "sonnet", "local:qwen")
+        system_prompt: system prompt text
+    
+    Returns:
+        RoutingDecision with provider, model, tier, score, reasons, phase
+    """
+    from gateway.config import LOCAL_LLM_DEFAULT_MODEL
+    
+    # ========== Handle explicit requests ==========
+    if explicit_model:
+        model_lower = explicit_model.lower()
+        
+        # Explicit local request
+        if "local" in model_lower or "ollama" in model_lower:
+            return RoutingDecision(
+                provider="local",
+                model=LOCAL_LLM_DEFAULT_MODEL,
+                tier="local",
+                score=1.0,
+                reasons=["explicit_local_request"],
+                phase="explicit"
+            )
+        
+        # Explicit opus request
+        if "opus" in model_lower or "high" in model_lower or "thinking" in model_lower:
+            return RoutingDecision(
+                provider="anthropic",
+                model=OPUS_MODEL,
+                tier="opus",
+                score=1.0,
+                reasons=["explicit_opus_request"],
+                phase="explicit"
+            )
+        
+        # Explicit sonnet request
+        if "sonnet" in model_lower or "fast" in model_lower:
+            return RoutingDecision(
+                provider="anthropic",
+                model=DEFAULT_MODEL,
+                tier="sonnet",
+                score=0.0,
+                reasons=["explicit_sonnet_request"],
+                phase="explicit"
+            )
+    
+    # Check routing mode
+    if SMART_ROUTING_MODE == "keyword":
+        # Legacy mode: use old should_use_opus logic
+        decision = await should_use_opus(messages, tools, project_id, explicit_model)
+        # Convert to new format
+        return RoutingDecision(
+            provider="anthropic",
+            model=decision.model,
+            tier="opus" if decision.is_opus else "sonnet",
+            score=decision.score,
+            reasons=decision.reasons,
+            phase="heuristic"
+        )
+    
+    if not ENABLE_SMART_ROUTING:
+        return RoutingDecision(
+            provider="anthropic",
+            model=DEFAULT_MODEL,
+            tier="sonnet",
+            score=0.0,
+            reasons=["smart_routing_disabled"],
+            phase="explicit"
+        )
+    
+    # ========== Phase 1: Fast Heuristics ==========
+    signals = compute_routing_signals(messages, tools, system_prompt)
+    
+    if signals.band == "LOCAL":
+        # High confidence: route to local
+        log.info(
+            "Smart routing v2 -> LOCAL (confidence=%.2f, reasons=%s)",
+            signals.confidence, signals.reasons[:3]
+        )
+        return RoutingDecision(
+            provider="local",
+            model=LOCAL_LLM_DEFAULT_MODEL,
+            tier="local",
+            score=signals.confidence,
+            reasons=signals.reasons,
+            phase="heuristic"
+        )
+    
+    if signals.band == "CLAUDE":
+        # High confidence: route to Claude, now decide sonnet vs opus
+        keyword_score, keyword_reasons = compute_keyword_score(extract_text_from_messages(messages))
+        complexity_score, complexity_reasons = compute_complexity_score(messages, tools, extract_text_from_messages(messages))
+        historical_score = await get_historical_score(project_id, OPUS_MODEL)
+        
+        total_score = keyword_score + complexity_score + historical_score
+        all_reasons = signals.reasons + keyword_reasons[:2] + complexity_reasons[:2]
+        
+        if historical_score != 0:
+            all_reasons.append(f"historical:{historical_score:.2f}")
+        
+        is_opus = total_score >= OPUS_ROUTING_THRESHOLD
+        model = OPUS_MODEL if is_opus else DEFAULT_MODEL
+        tier = "opus" if is_opus else "sonnet"
+        
+        if is_opus:
+            log.info(
+                "Smart routing v2 -> OPUS (score=%.2f, threshold=%.2f, reasons=%s)",
+                total_score, OPUS_ROUTING_THRESHOLD, all_reasons[:5]
+            )
+        else:
+            log.info(
+                "Smart routing v2 -> SONNET (score=%.2f, reasons=%s)",
+                total_score, all_reasons[:3]
+            )
+        
+        return RoutingDecision(
+            provider="anthropic",
+            model=model,
+            tier=tier,
+            score=total_score,
+            reasons=all_reasons,
+            phase="heuristic"
+        )
+    
+    # ========== Phase 2: LLM Classifier ==========
+    log.info("Smart routing v2: AMBIGUOUS, calling LLM classifier (reasons=%s)", signals.reasons[:3])
+    
+    try:
+        from gateway.routing_classifier import classify_with_llm
+        tier, reason = await classify_with_llm(messages)
+        
+        if tier == "local":
+            log.info("Smart routing v2 -> LOCAL (phase2, reason=%s)", reason)
+            return RoutingDecision(
+                provider="local",
+                model=LOCAL_LLM_DEFAULT_MODEL,
+                tier="local",
+                score=0.7,
+                reasons=[f"llm_classified:{reason}"] + signals.reasons,
+                phase="llm_classifier"
+            )
+        
+        # tier is sonnet or opus - use it directly
+        model = OPUS_MODEL if tier == "opus" else DEFAULT_MODEL
+        log.info("Smart routing v2 -> %s (phase2, reason=%s)", tier.upper(), reason)
+        
+        return RoutingDecision(
+            provider="anthropic",
+            model=model,
+            tier=tier,
+            score=0.6,
+            reasons=[f"llm_classified:{reason}"] + signals.reasons,
+            phase="llm_classifier"
+        )
+    
+    except Exception as e:
+        log.warning("Smart routing v2: LLM classifier failed: %r, using fallback=%s", e, signals.fallback_tier)
+        
+        # Fall back to Phase 1's best guess
+        if signals.fallback_tier == "local":
+            return RoutingDecision(
+                provider="local",
+                model=LOCAL_LLM_DEFAULT_MODEL,
+                tier="local",
+                score=0.5,
+                reasons=["llm_classifier_failed"] + signals.reasons,
+                phase="heuristic"
+            )
+        
+        model = OPUS_MODEL if signals.fallback_tier == "opus" else DEFAULT_MODEL
+        return RoutingDecision(
+            provider="anthropic",
+            model=model,
+            tier=signals.fallback_tier,
+            score=0.5,
+            reasons=["llm_classifier_failed"] + signals.reasons,
+            phase="heuristic"
+        )
 
 
 def extract_text_from_messages(messages: List[Dict[str, Any]]) -> str:
@@ -215,29 +634,39 @@ async def should_use_opus(
     project_id: Optional[int] = None,
     explicit_model: Optional[str] = None,
 ) -> RoutingDecision:
+    """
+    Legacy function for backward compatibility with keyword-based routing.
+    Only routes between Sonnet and Opus (not local).
+    """
     if explicit_model:
         model_lower = explicit_model.lower()
         if "opus" in model_lower or "high" in model_lower or "thinking" in model_lower:
             return RoutingDecision(
+                provider="anthropic",
                 model=OPUS_MODEL,
+                tier="opus",
                 score=1.0,
                 reasons=["explicit_opus_request"],
-                is_opus=True,
+                phase="explicit",
             )
         if "sonnet" in model_lower or "fast" in model_lower:
             return RoutingDecision(
+                provider="anthropic",
                 model=DEFAULT_MODEL,
+                tier="sonnet",
                 score=0.0,
                 reasons=["explicit_sonnet_request"],
-                is_opus=False,
+                phase="explicit",
             )
 
     if not ENABLE_SMART_ROUTING:
         return RoutingDecision(
+            provider="anthropic",
             model=DEFAULT_MODEL,
+            tier="sonnet",
             score=0.0,
             reasons=["smart_routing_disabled"],
-            is_opus=False,
+            phase="explicit",
         )
 
     text = extract_text_from_messages(messages)
@@ -255,20 +684,23 @@ async def should_use_opus(
 
     is_opus = total_score >= OPUS_ROUTING_THRESHOLD
     model = OPUS_MODEL if is_opus else DEFAULT_MODEL
+    tier = "opus" if is_opus else "sonnet"
 
     if is_opus:
         log.info(
-            "Smart routing -> OPUS (score=%.2f, threshold=%.2f, reasons=%s)",
+            "Smart routing (legacy) -> OPUS (score=%.2f, threshold=%.2f, reasons=%s)",
             total_score,
             OPUS_ROUTING_THRESHOLD,
             all_reasons[:5],
         )
 
     return RoutingDecision(
+        provider="anthropic",
         model=model,
+        tier=tier,
         score=total_score,
         reasons=all_reasons,
-        is_opus=is_opus,
+        phase="heuristic",
     )
 
 
@@ -278,5 +710,9 @@ async def route_model(
     project_id: Optional[int] = None,
     explicit_model: Optional[str] = None,
 ) -> str:
+    """
+    Backward-compatibility wrapper that returns just the model string.
+    New code should use route_request() instead.
+    """
     decision = await should_use_opus(messages, tools, project_id, explicit_model)
     return decision.model

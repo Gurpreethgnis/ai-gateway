@@ -78,6 +78,13 @@ ENABLE_REPO_MAP = os.getenv("ENABLE_REPO_MAP", "0") == "1"
 ENABLE_SMART_ROUTING = os.getenv("ENABLE_SMART_ROUTING", "1") == "1"
 OPUS_ROUTING_THRESHOLD = float(os.getenv("OPUS_ROUTING_THRESHOLD", "0.5"))
 
+# Smart Routing v2 (local-first with LLM classifier)
+SMART_ROUTING_MODE = os.getenv("SMART_ROUTING_MODE", "local_first")  # "keyword" (legacy) | "local_first" (new)
+ROUTING_CLASSIFIER_MODEL = os.getenv("ROUTING_CLASSIFIER_MODEL")  # defaults to LOCAL_LLM_DEFAULT_MODEL if not set
+ROUTING_CLASSIFIER_TIMEOUT = float(os.getenv("ROUTING_CLASSIFIER_TIMEOUT", "5"))  # Phase 2 timeout in seconds
+ROUTING_CLASSIFIER_CACHE_SIZE = int(os.getenv("ROUTING_CLASSIFIER_CACHE_SIZE", "256"))  # LRU cache size
+LOCAL_CONTEXT_CHAR_LIMIT = int(os.getenv("LOCAL_CONTEXT_CHAR_LIMIT", "30000"))  # max chars routable to local
+
 # Batch Processing
 ENABLE_BATCH_API = os.getenv("ENABLE_BATCH_API", "1") == "1"
 

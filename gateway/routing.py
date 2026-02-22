@@ -2,13 +2,6 @@ from typing import Optional
 
 from gateway.config import DEFAULT_MODEL, OPUS_MODEL, MODEL_PREFIX
 
-def is_hard_task(text: str) -> bool:
-    t = (text or "").lower()
-    return any(k in t for k in [
-        "architecture", "design doc", "production", "incident",
-        "migration", "refactor", "security", "performance",
-        "kubernetes", "terraform", "postmortem",
-    ])
 
 def strip_model_prefix(m: Optional[str]) -> Optional[str]:
     if not m:
@@ -132,7 +125,12 @@ def get_fallback_model(current_model: str, attempt: int) -> str:
     return chain[fallback_idx]
 
 def route_model_from_messages(user_text: str, explicit_model: Optional[str]) -> str:
+    """
+    Legacy simple routing function. Only used when smart routing is disabled.
+    New code should use route_request() from smart_routing module.
+    """
     mapped = map_model_alias(explicit_model)
     if mapped:
         return mapped
-    return OPUS_MODEL if is_hard_task((user_text or "")[:8000]) else DEFAULT_MODEL
+    # Simple fallback: default to Sonnet
+    return DEFAULT_MODEL

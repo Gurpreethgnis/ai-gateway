@@ -538,8 +538,17 @@ async def openai_chat_completions(req: Request):
 
     if use_smart_routing:
         try:
-            from gateway.smart_routing import route_model
-            model = await route_model(aa_messages, aa_tools, project_id, request_model)
+            from gateway.smart_routing import route_request
+            decision = await route_request(aa_messages, aa_tools, project_id, request_model, system_text)
+            
+            # If routed to local provider, handle via local provider
+            if decision.provider == "local":
+                log.info("OA smart routing -> LOCAL (tier=%s, phase=%s)", decision.tier, decision.phase)
+                return await handle_local_provider(parsed, ray, t0)
+            
+            # Otherwise use Claude with the selected model
+            model = decision.model
+            log.info("OA smart routing -> %s (tier=%s, phase=%s)", model, decision.tier, decision.phase)
         except Exception as e:
             log.warning("Smart routing failed: %r", e)
             model = route_model_from_messages(joined_user, request_model)
