@@ -92,6 +92,41 @@ CLAUDE_DEEP_REASONING_KEYWORDS = [
     "scalability", "infrastructure", "kubernetes", "terraform",
 ]
 
+# Patterns that indicate the user is asking a simple question (route to local even if tools are in the request)
+SIMPLE_QUESTION_PATTERNS = [
+    "explain this code", "explain the code", "what does this do", "what does it do",
+    "how does this work", "how do i ", "can you explain", "help me understand",
+    "what is this", "summarize this", "what is going on", "explain what",
+]
+
+
+def get_last_user_message_text(messages: List[Dict[str, Any]], max_chars: int = 2000) -> str:
+    """Extract text from the last user message only (for intent detection)."""
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            return content[:max_chars] if max_chars else content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+            text = " ".join(parts)
+            return text[:max_chars] if max_chars else text
+    return ""
+
+
+def is_simple_question_last_message(messages: List[Dict[str, Any]]) -> bool:
+    """True if the last user message looks like a simple explanation/summary question."""
+    last_text = get_last_user_message_text(messages, max_chars=600).strip().lower()
+    if not last_text or len(last_text) > 500:
+        return False
+    return any(p in last_text for p in SIMPLE_QUESTION_PATTERNS) or any(
+        p in last_text for p in LOCAL_TASK_PATTERNS
+    )
+
 
 def compute_routing_signals(
     messages: List[Dict[str, Any]],
@@ -107,18 +142,23 @@ def compute_routing_signals(
     total_chars = len(text)
     reasons = []
     
+    # ========== FAVOR LOCAL FIRST: simple question in last message ==========
+    # Clients (Cursor, etc.) often send tools on every request. If the user's
+    # last message is a simple "explain the code" / "what does this do", route
+    # to local even when tools are present; the model can answer without using tools.
+    if is_simple_question_last_message(messages):
+        # Only allow local if context isn't huge (local model limits)
+        if total_chars <= LOCAL_CONTEXT_CHAR_LIMIT:
+            return RoutingSignals(
+                band="LOCAL",
+                confidence=0.9,
+                reasons=["simple_question_last_message", "last_message_suggests_explanation"],
+                fallback_tier="local"
+            )
+    
     # ========== FORCE CLAUDE (high confidence) ==========
     
-    # Tools/functions present - local can't handle tool calls
-    if tools:
-        return RoutingSignals(
-            band="CLAUDE",
-            confidence=1.0,
-            reasons=["tools_present"],
-            fallback_tier="sonnet"
-        )
-    
-    # Check for tool_result blocks in messages
+    # Conversation already has tool_result blocks - must use Claude for tool continuity
     for msg in messages:
         content = msg.get("content", "")
         if isinstance(content, list):
@@ -130,6 +170,15 @@ def compute_routing_signals(
                         reasons=["tool_result_blocks"],
                         fallback_tier="sonnet"
                     )
+    
+    # Tools/functions present and last message wasn't a simple question - need Claude for tool use
+    if tools:
+        return RoutingSignals(
+            band="CLAUDE",
+            confidence=1.0,
+            reasons=["tools_present"],
+            fallback_tier="sonnet"
+        )
     
     # Very long context exceeds local model capacity
     if total_chars > LOCAL_CONTEXT_CHAR_LIMIT:
