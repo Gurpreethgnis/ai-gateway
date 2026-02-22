@@ -90,6 +90,10 @@ ENABLE_CASCADE_ROUTING = os.getenv("ENABLE_CASCADE_ROUTING", "1") == "1"
 CASCADE_QUALITY_CHECK_MODE = os.getenv("CASCADE_QUALITY_CHECK_MODE", "heuristic")  # "heuristic" | "llm" | "none"
 CASCADE_MIN_RESPONSE_LENGTH = int(os.getenv("CASCADE_MIN_RESPONSE_LENGTH", "100"))
 CASCADE_LOG_OUTCOMES = os.getenv("CASCADE_LOG_OUTCOMES", "1") == "1"
+CASCADE_ELIGIBLE_TIERS = os.getenv("CASCADE_ELIGIBLE_TIERS", "local,sonnet,opus").split(",")  # Which tiers can try local first
+
+# Opus Guard (prevent auto-escalation to most expensive model)
+ALLOW_AUTO_OPUS = os.getenv("ALLOW_AUTO_OPUS", "0") == "1"  # Allow heuristic routing to auto-select Opus
 
 # Semantic Routing Signal (embedding-based routing)
 ENABLE_SEMANTIC_ROUTING_SIGNAL = os.getenv("ENABLE_SEMANTIC_ROUTING_SIGNAL", "0") == "1"

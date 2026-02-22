@@ -1079,8 +1079,7 @@ async def openai_chat_completions(req: Request):
                     if final_usage:
                         cache_read_tokens = final_usage.get("cache_read_input_tokens", 0)
                         cache_write_tokens = final_usage.get("cache_creation_input_tokens", 0)
-                        
-                        await record_usage_to_db(
+                        asyncio.create_task(record_usage_to_db(
                             project_id, model,
                             final_usage.get("input_tokens", 0),
                             final_usage.get("output_tokens", 0),
@@ -1088,7 +1087,7 @@ async def openai_chat_completions(req: Request):
                             cache_read_tokens,
                             cache_write_tokens,
                             gateway_tokens_saved
-                        )
+                        ))
                         
                         # Record Anthropic prompt cache metrics
                         if cache_read_tokens > 0:
@@ -1247,13 +1246,12 @@ async def openai_chat_completions(req: Request):
 
     cache_read_tokens = usage.get("cache_read_input_tokens", 0) if usage else 0
     cache_write_tokens = usage.get("cache_creation_input_tokens", 0) if usage else 0
-    
-    await record_usage_to_db(
+    asyncio.create_task(record_usage_to_db(
         project_id, model, input_tokens, output_tokens, ray, False,
         cache_read_tokens,
         cache_write_tokens,
         gateway_tokens_saved
-    )
+    ))
     
     # Record Anthropic prompt cache metrics
     if cache_read_tokens > 0:

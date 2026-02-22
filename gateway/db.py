@@ -291,6 +291,10 @@ def _increment_dashboard_counters(
         pass
 
 
+# Timeout for usage record DB write; prevents slow DB from holding connections.
+RECORD_USAGE_DB_TIMEOUT = float(os.getenv("RECORD_USAGE_DB_TIMEOUT", "8"))
+
+
 async def record_usage_to_db(
     project_id,
     model: str,
@@ -305,9 +309,12 @@ async def record_usage_to_db(
     if not DATABASE_URL:
         return
     
-    try:
+    import asyncio
+    import logging
+    log = logging.getLogger("gateway")
+
+    async def _do_record():
         cost = calculate_cost(model, input_tokens, output_tokens)
-        
         _increment_dashboard_counters(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -315,7 +322,6 @@ async def record_usage_to_db(
             gateway_saved=gateway_tokens_saved,
             cost_usd=cost,
         )
-        
         async with get_session() as session:
             record = UsageRecord(
                 project_id=project_id,
@@ -331,9 +337,13 @@ async def record_usage_to_db(
             )
             session.add(record)
             await session.commit()
+
+    try:
+        await asyncio.wait_for(_do_record(), timeout=RECORD_USAGE_DB_TIMEOUT)
+    except asyncio.TimeoutError:
+        log.warning("record_usage_to_db timed out after %.0fs - skipping", RECORD_USAGE_DB_TIMEOUT)
     except Exception as e:
-        import logging
-        logging.getLogger("gateway").warning("record_usage_to_db failed: %r", e)
+        log.warning("record_usage_to_db failed: %r", e)
 
 
 COST_PER_1K_TOKENS = {

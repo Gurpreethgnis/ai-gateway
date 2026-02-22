@@ -146,20 +146,21 @@ def compute_routing_signals(
     # Clients (Cursor, etc.) often send tools on every request. If the user's
     # last message is a simple "explain the code" / "what does this do", route
     # to local even when tools are present; the model can answer without using tools.
+    # Context size will be handled when sending to local (truncate), not when deciding.
     if is_simple_question_last_message(messages):
-        # Only allow local if context isn't huge (local model limits)
-        if total_chars <= LOCAL_CONTEXT_CHAR_LIMIT:
-            return RoutingSignals(
-                band="LOCAL",
-                confidence=0.9,
-                reasons=["simple_question_last_message", "last_message_suggests_explanation"],
-                fallback_tier="local"
-            )
+        return RoutingSignals(
+            band="LOCAL",
+            confidence=0.9,
+            reasons=["simple_question_last_message", "last_message_suggests_explanation"],
+            fallback_tier="local"
+        )
     
     # ========== FORCE CLAUDE (high confidence) ==========
     
-    # Conversation already has tool_result blocks - must use Claude for tool continuity
-    for msg in messages:
+    # Active tool-use loop: check only last 4 messages for tool_result blocks
+    # (old tool_result blocks from history don't affect current routing decision)
+    recent_messages = messages[-4:] if len(messages) > 4 else messages
+    for msg in recent_messages:
         content = msg.get("content", "")
         if isinstance(content, list):
             for block in content:
@@ -167,7 +168,7 @@ def compute_routing_signals(
                     return RoutingSignals(
                         band="CLAUDE",
                         confidence=1.0,
-                        reasons=["tool_result_blocks"],
+                        reasons=["active_tool_result_blocks"],
                         fallback_tier="sonnet"
                     )
     
@@ -211,9 +212,11 @@ def compute_routing_signals(
             )
     
     # Deep reasoning keywords (architecture, security, etc.)
+    # Check last user message only, not full conversation (avoids system prompt pollution)
+    last_user_text = get_last_user_message_text(messages, max_chars=None).lower()
     deep_keywords_found = []
     for keyword in CLAUDE_DEEP_REASONING_KEYWORDS:
-        if keyword in text_lower:
+        if keyword in last_user_text:
             deep_keywords_found.append(keyword)
     
     if len(deep_keywords_found) >= 2:
@@ -468,8 +471,11 @@ async def route_request(
     
     if signals.band == "CLAUDE":
         # High confidence: route to Claude, now decide sonnet vs opus
-        keyword_score, keyword_reasons = compute_keyword_score(extract_text_from_messages(messages))
-        complexity_score, complexity_reasons = compute_complexity_score(messages, tools, extract_text_from_messages(messages))
+        # Score based on last user message intent, not full conversation history
+        last_user_text = get_last_user_message_text(messages, max_chars=None)
+        is_simple_q = is_simple_question_last_message(messages)
+        keyword_score, keyword_reasons = compute_keyword_score(last_user_text)
+        complexity_score, complexity_reasons = compute_complexity_score(messages, tools, last_user_text, is_simple_q)
         historical_score = await get_historical_score(project_id, OPUS_MODEL)
         
         total_score = keyword_score + complexity_score + historical_score
@@ -478,7 +484,9 @@ async def route_request(
         if historical_score != 0:
             all_reasons.append(f"historical:{historical_score:.2f}")
         
-        is_opus = total_score >= OPUS_ROUTING_THRESHOLD
+        # Opus guard: only allow auto-opus if explicitly enabled
+        from gateway.config import ALLOW_AUTO_OPUS
+        is_opus = (total_score >= OPUS_ROUTING_THRESHOLD) and ALLOW_AUTO_OPUS
         model = OPUS_MODEL if is_opus else DEFAULT_MODEL
         tier = "opus" if is_opus else "sonnet"
         
@@ -593,27 +601,40 @@ def compute_complexity_score(
     messages: List[Dict[str, Any]],
     tools: List[Dict[str, Any]],
     text: str,
+    is_simple_question: bool = False,
 ) -> Tuple[float, List[str]]:
+    """
+    Compute complexity score based on last user message text.
+    
+    Args:
+        messages: All messages (for tool_use detection)
+        tools: Tool definitions
+        text: Last user message text (not full conversation)
+        is_simple_question: Whether the last message is a simple question
+    """
     score = 0.0
     reasons = []
 
-    if len(text) > 5000:
-        addition = 0.15
-        score += addition
-        reasons.append(f"+long_context:{addition:.2f}")
-    elif len(text) > 2000:
-        addition = 0.08
-        score += addition
-        reasons.append(f"+medium_context:{addition:.2f}")
+    # Don't penalize simple questions for having long conversations or many tools
+    # These are properties of the client (Cursor), not the task complexity
+    if not is_simple_question:
+        if len(text) > 5000:
+            addition = 0.15
+            score += addition
+            reasons.append(f"+long_context:{addition:.2f}")
+        elif len(text) > 2000:
+            addition = 0.08
+            score += addition
+            reasons.append(f"+medium_context:{addition:.2f}")
 
-    if len(tools) > 8:
-        addition = 0.15
-        score += addition
-        reasons.append(f"+many_tools:{addition:.2f}")
-    elif len(tools) > 4:
-        addition = 0.08
-        score += addition
-        reasons.append(f"+some_tools:{addition:.2f}")
+        if len(tools) > 8:
+            addition = 0.15
+            score += addition
+            reasons.append(f"+many_tools:{addition:.2f}")
+        elif len(tools) > 4:
+            addition = 0.08
+            score += addition
+            reasons.append(f"+some_tools:{addition:.2f}")
 
     tool_uses = sum(1 for m in messages if m.get("tool_calls"))
     if tool_uses > 5:
@@ -751,10 +772,12 @@ async def should_use_opus(
             phase="explicit",
         )
 
-    text = extract_text_from_messages(messages)
+    # Use last user message for scoring in legacy mode too
+    last_user_text = get_last_user_message_text(messages, max_chars=None)
+    is_simple_q = is_simple_question_last_message(messages)
 
-    keyword_score, keyword_reasons = compute_keyword_score(text)
-    complexity_score, complexity_reasons = compute_complexity_score(messages, tools, text)
+    keyword_score, keyword_reasons = compute_keyword_score(last_user_text)
+    complexity_score, complexity_reasons = compute_complexity_score(messages, tools, last_user_text, is_simple_q)
 
     historical_score = await get_historical_score(project_id, OPUS_MODEL)
 
@@ -764,7 +787,9 @@ async def should_use_opus(
     if historical_score != 0:
         all_reasons.append(f"historical:{historical_score:.2f}")
 
-    is_opus = total_score >= OPUS_ROUTING_THRESHOLD
+    # Opus guard in legacy mode too
+    from gateway.config import ALLOW_AUTO_OPUS
+    is_opus = (total_score >= OPUS_ROUTING_THRESHOLD) and ALLOW_AUTO_OPUS
     model = OPUS_MODEL if is_opus else DEFAULT_MODEL
     tier = "opus" if is_opus else "sonnet"
 

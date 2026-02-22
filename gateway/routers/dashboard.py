@@ -304,10 +304,16 @@ async def _get_recent_requests(limit: int = 20) -> list[dict]:
                 })
             return rows
     
+    timeout_s = 8.0
     try:
-        return await asyncio.wait_for(_query(), timeout=3.0)
+        import os
+        timeout_s = float(os.getenv("DASHBOARD_RECENT_REQUESTS_TIMEOUT", "8"))
+    except (ValueError, TypeError):
+        pass
+    try:
+        return await asyncio.wait_for(_query(), timeout=timeout_s)
     except asyncio.TimeoutError:
-        log.warning("Recent requests query timed out (3s) - skipping table")
+        log.warning("Recent requests query timed out (%.0fs) - skipping table", timeout_s)
         return []
     except Exception as e:
         log.warning("Failed to fetch recent requests: %r", e)

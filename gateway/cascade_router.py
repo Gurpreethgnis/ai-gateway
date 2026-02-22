@@ -32,6 +32,9 @@ async def route_with_cascade(
     """
     Route with cascade: try local first, escalate if quality check fails.
     
+    FrugalGPT-style cascade: try cheap model first even when routing suggests expensive.
+    Only skip cascade for explicitly forced tiers (user typed "opus", skill forced it).
+    
     Args:
         messages: Conversation messages
         tools: Tool definitions
@@ -50,6 +53,9 @@ async def route_with_cascade(
         decision = await route_request(messages, tools, project_id, explicit_model, system_prompt)
         return decision, None, {"cascade_enabled": False}
     
+    from gateway.config import CASCADE_ELIGIBLE_TIERS
+    from gateway.smart_routing import is_simple_question_last_message
+    
     t0 = time.time()
     
     # Phase 1: Initial routing decision
@@ -67,8 +73,22 @@ async def route_with_cascade(
         "total_cascade_time_ms": None,
     }
     
-    # If initial decision is not local, no cascade needed
-    if initial_decision.provider != "local":
+    # Decide if we should try local first (cascade eligibility)
+    is_explicit = initial_decision.phase == "explicit"
+    tier_eligible = initial_decision.tier in CASCADE_ELIGIBLE_TIERS
+    is_simple = is_simple_question_last_message(messages)
+    
+    # Try local if: (tier is eligible AND simple question) OR (tier is already local)
+    should_try_local = (tier_eligible and is_simple) or initial_decision.provider == "local"
+    
+    # Never cascade if explicitly forced (user typed "opus", skill forced it)
+    if is_explicit and initial_decision.provider != "local":
+        should_try_local = False
+        cascade_metadata["total_cascade_time_ms"] = int((time.time() - t0) * 1000)
+        return initial_decision, None, cascade_metadata
+    
+    # If not eligible for cascade, pass through
+    if not should_try_local:
         cascade_metadata["total_cascade_time_ms"] = int((time.time() - t0) * 1000)
         return initial_decision, None, cascade_metadata
     
@@ -133,7 +153,13 @@ async def _call_local_for_cascade(
     system_prompt: str,
 ) -> Optional[Dict[str, Any]]:
     """
-    Call local Ollama for cascade attempt.
+    Call local Ollama for cascade attempt with context truncation.
+    
+    Truncates context to fit local model's window:
+    - Last 5-8 messages only
+    - Strips all tool_result and tool_use blocks (local can't use tools)
+    - Limits system prompt to 2000 chars
+    - Ensures total stays under LOCAL_CONTEXT_CHAR_LIMIT
     
     Args:
         messages: Conversation messages
@@ -144,25 +170,67 @@ async def _call_local_for_cascade(
     """
     try:
         from gateway.providers.ollama import call_ollama
+        from gateway.config import LOCAL_CONTEXT_CHAR_LIMIT
         
-        # Convert messages to Ollama format
+        # Truncate system prompt (keep first 2000 chars, strips Cursor boilerplate)
+        truncated_system = system_prompt[:2000] if system_prompt else ""
+        
+        # Keep only last 8 messages (or fewer if total chars exceeds limit)
+        recent_messages = messages[-8:] if len(messages) > 8 else messages
+        
+        # Convert messages to Ollama format, stripping tool blocks
         ollama_messages = []
-        if system_prompt:
-            ollama_messages.append({"role": "system", "content": system_prompt})
+        if truncated_system:
+            ollama_messages.append({"role": "system", "content": truncated_system})
         
-        for msg in messages:
+        total_chars = len(truncated_system)
+        
+        for msg in reversed(recent_messages):
             role = msg.get("role", "user")
             content = msg.get("content", "")
             
-            # Extract text from blocks if needed
+            # Extract text from blocks, skip tool blocks
             if isinstance(content, list):
                 text_parts = []
                 for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
+                    if isinstance(block, dict):
+                        block_type = block.get("type")
+                        # Skip tool_result and tool_use blocks (local model can't use them)
+                        if block_type in ("tool_result", "tool_use"):
+                            continue
+                        if block_type == "text":
+                            text_parts.append(block.get("text", ""))
+                    elif isinstance(block, str):
+                        text_parts.append(block)
                 content = " ".join(text_parts)
             
-            ollama_messages.append({"role": role, "content": content})
+            # Skip empty messages
+            if not content or not content.strip():
+                continue
+            
+            # Check if adding this message would exceed limit
+            if total_chars + len(content) > LOCAL_CONTEXT_CHAR_LIMIT:
+                break
+            
+            ollama_messages.insert(1 if truncated_system else 0, {"role": role, "content": content})
+            total_chars += len(content)
+        
+        # Ensure we have at least the last user message
+        if not any(m.get("role") == "user" for m in ollama_messages):
+            last_user = next((m for m in reversed(messages) if m.get("role") == "user"), None)
+            if last_user:
+                content = last_user.get("content", "")
+                if isinstance(content, list):
+                    text_parts = []
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                    content = " ".join(text_parts)
+                # Truncate if too long
+                content = content[:LOCAL_CONTEXT_CHAR_LIMIT - len(truncated_system)]
+                ollama_messages.append({"role": "user", "content": content})
+        
+        log.debug("Cascade: calling local with %d messages, %d chars", len(ollama_messages), total_chars)
         
         # Call Ollama
         response = await call_ollama(
