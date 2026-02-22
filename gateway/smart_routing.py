@@ -274,6 +274,38 @@ def compute_routing_signals(
 
 
 # =============================================================================
+# Explicit vs full model ID
+# =============================================================================
+
+def is_explicit_model_alias(model: Optional[str]) -> bool:
+    """
+    True only when the user sent an intent alias (e.g. "sonnet", "opus", "local"),
+    not a full API model ID like "claude-sonnet-4-0". When the client sends a full
+    ID we run smart routing (Phase 1/2) so local can be chosen; when they send
+    an alias we honor it as explicit.
+    """
+    if not model or not str(model).strip():
+        return False
+    m = str(model).strip().lower()
+    # Full Anthropic model IDs: do NOT treat as explicit — run Phase 1/2 (local-first)
+    if m.startswith("claude-"):
+        parts = m.split("-")
+        if len(parts) >= 4:  # e.g. claude-sonnet-4-0, claude-opus-4-5
+            return False
+        if len(parts) == 3 and m[-1].isdigit():  # e.g. claude-sonnet-4
+            return False
+    # Explicit intent aliases
+    if m in ("sonnet", "opus", "local", "ollama", "auto", "smartroute", "fast", "high", "thinking"):
+        return True
+    if m.startswith("local:") or m.startswith("ollama:"):
+        return True
+    # Short aliases
+    if m in ("sonnet-4", "sonnet4", "claude-sonnet", "opus-4", "opus4", "claude-opus"):
+        return True
+    return False
+
+
+# =============================================================================
 # Phase 2 Integration & Main Entry Point
 # =============================================================================
 
@@ -305,8 +337,9 @@ async def route_request(
     """
     from gateway.config import LOCAL_LLM_DEFAULT_MODEL
     
-    # ========== Handle explicit requests ==========
-    if explicit_model:
+    # ========== Handle explicit requests (only for intent aliases, not full model IDs) ==========
+    # When client sends e.g. "claude-sonnet-4-0", we run Phase 1/2 so local can be chosen.
+    if explicit_model and is_explicit_model_alias(explicit_model):
         model_lower = explicit_model.lower()
         
         # Explicit local request
@@ -638,7 +671,7 @@ async def should_use_opus(
     Legacy function for backward compatibility with keyword-based routing.
     Only routes between Sonnet and Opus (not local).
     """
-    if explicit_model:
+    if explicit_model and is_explicit_model_alias(explicit_model):
         model_lower = explicit_model.lower()
         if "opus" in model_lower or "high" in model_lower or "thinking" in model_lower:
             return RoutingDecision(
