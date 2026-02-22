@@ -808,10 +808,10 @@ async def openai_chat_completions(req: Request):
                         # Record Anthropic prompt cache metrics
                         if cache_read_tokens > 0:
                             from gateway.metrics import record_prompt_cache_tokens
-                            record_prompt_cache_tokens("read", project_name or "default", cache_read_tokens)
+                            record_prompt_cache_tokens("read", model, project_name or "default", cache_read_tokens)
                         if cache_write_tokens > 0:
                             from gateway.metrics import record_prompt_cache_tokens
-                            record_prompt_cache_tokens("write", project_name or "default", cache_write_tokens)
+                            record_prompt_cache_tokens("write", model, project_name or "default", cache_write_tokens)
 
                     finished = True
 
@@ -973,10 +973,10 @@ async def openai_chat_completions(req: Request):
     # Record Anthropic prompt cache metrics
     if cache_read_tokens > 0:
         from gateway.metrics import record_prompt_cache_tokens
-        record_prompt_cache_tokens("read", project_name or "default", cache_read_tokens)
+        record_prompt_cache_tokens("read", model, project_name or "default", cache_read_tokens)
     if cache_write_tokens > 0:
         from gateway.metrics import record_prompt_cache_tokens
-        record_prompt_cache_tokens("write", project_name or "default", cache_write_tokens)
+        record_prompt_cache_tokens("write", model, project_name or "default", cache_write_tokens)
 
     if ENABLE_MEMORY_LAYER and project_id and out_text and len(out_text) > 200:
         try:
