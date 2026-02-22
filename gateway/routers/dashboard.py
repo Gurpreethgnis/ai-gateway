@@ -268,13 +268,15 @@ DASHBOARD_HTML = """
 """
 
 @router.get("/dashboard", response_class=HTMLResponse)
-async def get_dashboard(request: Request, refresh: bool = False):
+async def get_dashboard(request: Request, refresh: bool = False, full: bool = False):
     from gateway.db import async_session_factory
     from gateway.cache import rds
     import json
 
     # 1. Try Cache First (unless refresh=True)
-    cache_key = "dashboard_html_v2"
+    mode_label = "full" if full else "lite"
+    cache_key = f"dashboard_html_{mode_label}_v3"
+    
     if rds and not refresh:
         try:
             cached_html = rds.get(cache_key)
@@ -320,11 +322,18 @@ async def get_dashboard(request: Request, refresh: bool = False):
 
     try:
         async with get_session() as session:
-            # Aggregates - Limit to last 90 days to avoid full table scan timeouts
-            window = datetime.utcnow() - timedelta(days=90)
+            # Aggregates - Lite (24h) or Full (90d)
+            if full:
+                window_days = 90
+                view_name = "Full Analytics (90 Days)"
+            else:
+                window_days = 1
+                view_name = "Lite Overview (24 Hours)"
+                
+            window = datetime.utcnow() - timedelta(days=window_days)
             
             try:
-                # Total input and cost for last 90 days
+                # Total input and cost for window
                 total_q = await session.execute(
                     select(
                         func.sum(UsageRecord.input_tokens),
@@ -344,7 +353,7 @@ async def get_dashboard(request: Request, refresh: bool = False):
             total_input = total_input or 0
             total_cost = total_cost or 0
             
-            # Calculate cache efficiency and savings for last 90 days
+            # Calculate cache efficiency and savings for window
             total_cached = 0
             try:
                 cache_result = await session.execute(
@@ -356,7 +365,7 @@ async def get_dashboard(request: Request, refresh: bool = False):
                 import logging
                 logging.getLogger("gateway").error("Dashboard cache query failed: %r", e)
             
-            # Calculate gateway savings for last 90 days
+            # Calculate gateway savings for window
             total_gateway_saved = 0
             try:
                 gateway_result = await session.execute(
@@ -365,15 +374,14 @@ async def get_dashboard(request: Request, refresh: bool = False):
                 )
                 total_gateway_saved = gateway_result.scalar() or 0
             except Exception:
-                # Column may not exist yet in older databases or query failed
                 total_gateway_saved = 0
             
             total_processed = total_input + total_cached + total_gateway_saved
             efficiency = ((total_cached + total_gateway_saved) / total_processed * 100) if total_processed > 0 else 0
             
-            # Estimate savings: cached tokens cost less to process
-            cache_cost_savings = total_cached * 0.001 * 0.003  # rough estimate
-            gateway_cost_savings = total_gateway_saved * 0.001 * 0.003  # tokens never sent
+            # Estimate savings
+            cache_cost_savings = total_cached * 0.001 * 0.003
+            gateway_cost_savings = total_gateway_saved * 0.001 * 0.003
             savings_usd = cache_cost_savings + gateway_cost_savings
             
             active_connections = 0
@@ -422,6 +430,18 @@ async def get_dashboard(request: Request, refresh: bool = False):
         html = html.replace("{{ savings_usd }}", f"${savings_usd:.4f}")
         html = html.replace("{{ active_connections }}", str(active_connections))
         
+        # UI Additions for Mode
+        mode_btn_html = ""
+        if full:
+            mode_btn_html = '<button class="refresh-btn" style="background: var(--bg); color: var(--text); border: 1px solid var(--border); margin-right: 0.5rem;" onclick="window.location.href=\'/dashboard\'">Switch to Lite View</button>'
+        else:
+            mode_btn_html = '<button class="refresh-btn" style="background: var(--accent); color: white; margin-right: 0.5rem;" onclick="window.location.href=\'/dashboard?full=True\'">Load 90-Day Analytics</button>'
+            
+        html = html.replace('<button class="refresh-btn" onclick="window.location.href=\'/dashboard?refresh=True\'">Refresh Data</button>', 
+                            f'{mode_btn_html}<button class="refresh-btn" onclick="window.location.href=\'/dashboard?refresh=True&full={full}\'">Refresh Data</button>')
+        
+        html = html.replace("Real-time Claude token savings dashboard", f"Real-time Claude token savings dashboard | <strong>{view_name}</strong>")
+
         rows_html = ""
         for r in processed_recent:
             badge = '<span class="badge badge-cached">CACHED</span>' if r["cache_read"] > 0 else '<span class="badge badge-miss">MISS</span>'
@@ -444,12 +464,13 @@ async def get_dashboard(request: Request, refresh: bool = False):
         if len(parts_for) > 1 and len(parts_end) > 1:
             final_html = parts_for[0] + rows_html + parts_end[1]
         else:
-            final_html = html # Fallback if split fails
+            final_html = html 
             
-        # Cache the final HTML for 5 minutes (300 seconds)
+        # Cache for 60s (Lite) or 300s (Full)
+        ttl = 300 if full else 60
         if rds:
             try:
-                rds.setex(cache_key, 300, final_html)
+                rds.setex(cache_key, ttl, final_html)
             except Exception:
                 pass
 
@@ -461,6 +482,6 @@ async def get_dashboard(request: Request, refresh: bool = False):
         import logging
         logging.getLogger("gateway").error("CRITICAL DASHBOARD ERROR: %s", err_msg)
         return HTMLResponse(
-            content=f"<html><body><h1>Dashboard Error</h1><pre>{err_msg}</pre></body></html>",
+            content=f"<html><body style='background:#0f172a;color:white;padding:2rem;font-family:sans-serif;'><h1>Dashboard Error</h1><p>The aggregation took too long or failed.</p><button onclick='window.location.href=\"/dashboard\"' style='background:var(--primary);padding:0.5rem 1rem;border-radius:0.5rem;cursor:pointer;'>Go Back to Lite View</button><pre style='color:#94a3b8;margin-top:1rem;'>{err_msg}</pre></body></html>",
             status_code=500
         )
