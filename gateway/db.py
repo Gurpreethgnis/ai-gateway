@@ -52,6 +52,14 @@ class UsageRecord(Base):
 
     __table_args__ = (
         Index("ix_usage_project_timestamp", "project_id", "timestamp"),
+        Index(
+            "ix_usage_dashboard_agg",
+            "timestamp",
+            "input_tokens",
+            "cost_usd",
+            "cache_read_input_tokens",
+            "gateway_tokens_saved",
+        ),
     )
 
 
@@ -168,7 +176,7 @@ def init_db():
         pool_recycle=300,
         connect_args={
             "server_settings": {
-                "statement_timeout": "8000"
+                "statement_timeout": "30000"
             }
         }
     )

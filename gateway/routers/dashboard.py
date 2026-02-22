@@ -1,13 +1,17 @@
 from fastapi import APIRouter, Request, Depends
 from fastapi.responses import HTMLResponse
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from gateway.db import get_session, UsageRecord, Project
 from gateway.security import extract_gateway_api_key
 import json
 import asyncio
+import logging
 from datetime import datetime, timedelta
 
 router = APIRouter()
+log = logging.getLogger("gateway")
+
+_background_tasks: dict[str, asyncio.Task] = {}
 
 DASHBOARD_HTML = """
 <!DOCTYPE html>
@@ -268,34 +272,7 @@ DASHBOARD_HTML = """
 </html>
 """
 
-@router.get("/dashboard", response_class=HTMLResponse)
-async def get_dashboard(request: Request, refresh: bool = False, full: bool = False):
-    from gateway.db import async_session_factory
-    from gateway.cache import rds
-    import json
-
-    # 1. Try Cache First (unless refresh=True)
-    mode_label = "full" if full else "lite"
-    cache_key = f"dashboard_html_{mode_label}_v3"
-    lock_key = f"dashboard_building_{mode_label}"
-    
-    if rds and not refresh:
-        try:
-            cached_html = rds.get(cache_key)
-            if cached_html:
-                return HTMLResponse(content=cached_html)
-            
-            # Check if another request is building the cache
-            building = rds.get(lock_key)
-            if building:
-                # Wait up to 3 seconds for the cache to appear
-                for _ in range(6):
-                    await asyncio.sleep(0.5)
-                    cached_html = rds.get(cache_key)
-                    if cached_html:
-                        return HTMLResponse(content=cached_html)
-                # If still not ready, return loading page
-                return HTMLResponse(content="""
+LOADING_HTML = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -316,28 +293,18 @@ async def get_dashboard(request: Request, refresh: bool = False, full: bool = Fa
     <div class="box">
         <h1>Loading Dashboard...</h1>
         <div class="spinner"></div>
-        <p>Computing analytics. This page will refresh automatically.</p>
+        <p>Computing analytics. This page will refresh automatically in a few seconds.</p>
     </div>
 </body>
 </html>
-""", status_code=200)
-        except Exception:
-            pass
-    
-    # Set building lock
-    if rds:
-        try:
-            rds.setex(lock_key, 10, "1")
-        except Exception:
-            pass
+"""
 
-    if async_session_factory is None:
-        return HTMLResponse(content="""
+NO_DB_HTML = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>AI Gateway — Setup Required</title>
+    <title>AI Gateway -- Setup Required</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
         body { font-family: 'Inter', sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
@@ -351,245 +318,190 @@ async def get_dashboard(request: Request, refresh: bool = False, full: bool = Fa
 </head>
 <body>
     <div class="box">
-        <h1>📊 Database Not Connected</h1>
+        <h1>Database Not Connected</h1>
         <p>The dashboard needs a PostgreSQL database to store and display your token savings.</p>
         <div class="steps">
             <ol>
-                <li>In Railway, click <strong>+ New → Database → PostgreSQL</strong></li>
+                <li>In Railway, click <strong>+ New &rarr; Database &rarr; PostgreSQL</strong></li>
                 <li>Railway will auto-add <code>DATABASE_URL</code> to your service</li>
                 <li>Your gateway will restart and begin tracking stats</li>
-                <li>Come back here to see your token savings! 🎉</li>
+                <li>Come back here to see your token savings!</li>
             </ol>
         </div>
     </div>
 </body>
 </html>
-""", status_code=200)
+"""
 
-    async def build_dashboard():
+
+async def _build_and_cache(full: bool):
+    """Background task: query DB, render HTML, store in Redis cache."""
+    from gateway.db import async_session_factory
+    from gateway.cache import rds
+
+    mode_label = "full" if full else "lite"
+    cache_key = f"dashboard_html_{mode_label}_v4"
+    task_key = f"bg_{mode_label}"
+
+    try:
         async with get_session() as session:
-            # Aggregates - Lite (24h) or Full (90d)
             if full:
                 window_days = 90
                 view_name = "Full Analytics (90 Days)"
             else:
                 window_days = 1
                 view_name = "Lite Overview (24 Hours)"
-                
-            window = datetime.utcnow() - timedelta(days=window_days)
-            
-            # COMBINED QUERY - All aggregates in one shot
-            try:
-                combined_q = await session.execute(
-                    select(
-                        func.sum(UsageRecord.input_tokens),
-                        func.sum(UsageRecord.cost_usd),
-                        func.sum(UsageRecord.cache_read_input_tokens),
-                        func.sum(UsageRecord.gateway_tokens_saved),
-                    ).where(UsageRecord.timestamp >= window)
-                )
-                result = combined_q.fetchone()
-                if result:
-                    total_input, total_cost, total_cached, total_gateway_saved = result
-                else:
-                    total_input, total_cost, total_cached, total_gateway_saved = 0, 0, 0, 0
-            except Exception as e:
-                import logging
-                logging.getLogger("gateway").error("Dashboard combined query failed: %r", e)
-                total_input, total_cost, total_cached, total_gateway_saved = 0, 0, 0, 0
 
-            total_input = total_input or 0
-            total_cost = total_cost or 0
-            total_cached = total_cached or 0
-            total_gateway_saved = total_gateway_saved or 0
-            
+            window = datetime.utcnow() - timedelta(days=window_days)
+
+            total_input = total_cost = total_cached = total_gateway_saved = 0
+            try:
+                row = (await session.execute(
+                    text("""
+                        SELECT COALESCE(SUM(input_tokens), 0),
+                               COALESCE(SUM(cost_usd), 0),
+                               COALESCE(SUM(cache_read_input_tokens), 0),
+                               COALESCE(SUM(gateway_tokens_saved), 0)
+                          FROM usage_records
+                         WHERE timestamp >= :win
+                    """),
+                    {"win": window},
+                )).fetchone()
+                if row:
+                    total_input, total_cost, total_cached, total_gateway_saved = (
+                        int(row[0]), float(row[1]), int(row[2]), int(row[3])
+                    )
+            except Exception as e:
+                log.error("Dashboard aggregate query failed: %r", e)
+
             total_processed = total_input + total_cached + total_gateway_saved
-            efficiency = ((total_cached + total_gateway_saved) / total_processed * 100) if total_processed > 0 else 0
-            
-            # Estimate savings
+            efficiency = ((total_cached + total_gateway_saved) / total_processed * 100) if total_processed > 0 else 0.0
+
             cache_cost_savings = total_cached * 0.001 * 0.003
             gateway_cost_savings = total_gateway_saved * 0.001 * 0.003
             savings_usd = cache_cost_savings + gateway_cost_savings
-            
+
             active_connections = 0
             try:
                 if rds:
                     active_connections = rds.zcard("concurrency:anthropic:sonnet") or 0
-            except:
+            except Exception:
                 pass
 
-            # Recent records
             processed_recent = []
             try:
                 recent_q = await session.execute(
                     select(UsageRecord).order_by(UsageRecord.timestamp.desc()).limit(20)
                 )
-                recent_rows = recent_q.scalars().all()
-                for r in recent_rows:
+                for r in recent_q.scalars().all():
                     total_in = r.input_tokens or 0
-                    cache_r = getattr(r, 'cache_read_input_tokens', 0) or 0
-                    gateway_saved = getattr(r, 'gateway_tokens_saved', 0) or 0
-                    total_tokens = total_in + cache_r + gateway_saved
-                    savings_pct = ((cache_r + gateway_saved) / total_tokens * 100) if total_tokens > 0 else 0
-                    
-                    ts = "00:00:00"
-                    if r.timestamp:
-                        ts = r.timestamp.strftime("%H:%M:%S")
-
+                    cache_r = getattr(r, "cache_read_input_tokens", 0) or 0
+                    gw_saved = getattr(r, "gateway_tokens_saved", 0) or 0
+                    total_tok = total_in + cache_r + gw_saved
+                    sav_pct = ((cache_r + gw_saved) / total_tok * 100) if total_tok > 0 else 0.0
+                    ts = r.timestamp.strftime("%H:%M:%S") if r.timestamp else "00:00:00"
                     processed_recent.append({
                         "timestamp": ts,
                         "model": (r.model or "unknown").replace("claude-3-5-", ""),
                         "input": total_in,
                         "cache_read": cache_r,
-                        "gateway_saved": gateway_saved,
+                        "gateway_saved": gw_saved,
                         "output": r.output_tokens or 0,
-                        "savings_pct": f"{savings_pct:.1f}"
+                        "savings_pct": f"{sav_pct:.1f}",
                     })
             except Exception as e:
-                import logging
-                logging.getLogger("gateway").error("Dashboard recent rows query failed: %r", e)
+                log.error("Dashboard recent rows query failed: %r", e)
 
-            html = DASHBOARD_HTML
-            html = html.replace("{{ total_input }}", f"{total_input:,}")
-            html = html.replace("{{ total_cached }}", f"{total_cached:,}")
-            html = html.replace("{{ total_gateway_saved }}", f"{total_gateway_saved:,}")
-            html = html.replace("{{ efficiency }}", f"{efficiency:.1f}%")
-            html = html.replace("{{ savings_usd }}", f"${savings_usd:.4f}")
-            html = html.replace("{{ active_connections }}", str(active_connections))
-            
-            # UI Additions for Mode
-            mode_btn_html = ""
-            if full:
-                mode_btn_html = '<button class="refresh-btn" style="background: var(--bg); color: var(--text); border: 1px solid var(--border); margin-right: 0.5rem;" onclick="window.location.href=\'/dashboard\'">Switch to Lite View</button>'
-            else:
-                mode_btn_html = '<button class="refresh-btn" style="background: var(--accent); color: white; margin-right: 0.5rem;" onclick="window.location.href=\'/dashboard?full=True\'">Load 90-Day Analytics</button>'
-                
-            html = html.replace('<button class="refresh-btn" onclick="window.location.href=\'/dashboard?refresh=True\'">Refresh Data</button>', 
-                                f'{mode_btn_html}<button class="refresh-btn" onclick="window.location.href=\'/dashboard?refresh=True&full={full}\'">Refresh Data</button>')
-            
-            html = html.replace("Real-time Claude token savings dashboard", f"Real-time Claude token savings dashboard | <strong>{view_name}</strong>")
+        html = DASHBOARD_HTML
+        html = html.replace("{{ total_input }}", f"{total_input:,}")
+        html = html.replace("{{ total_cached }}", f"{total_cached:,}")
+        html = html.replace("{{ total_gateway_saved }}", f"{total_gateway_saved:,}")
+        html = html.replace("{{ efficiency }}", f"{efficiency:.1f}%")
+        html = html.replace("{{ savings_usd }}", f"${savings_usd:.4f}")
+        html = html.replace("{{ active_connections }}", str(active_connections))
 
-            rows_html = ""
-            for r in processed_recent:
-                badge = '<span class="badge badge-cached">CACHED</span>' if r["cache_read"] > 0 else '<span class="badge badge-miss">MISS</span>'
-                rows_html += f"""
-            <tr>
-                <td>{r['timestamp']}</td>
-                <td style="font-family: monospace; font-size: 0.75rem;">{r['model']}</td>
-                <td>{badge}</td>
-                <td>{r['input']}</td>
-                <td style="color: #10b981;">{r['cache_read']}</td>
-                <td style="color: #3b82f6;">{r['gateway_saved']}</td>
-                <td>{r['output']}</td>
-                <td>{r['savings_pct']}%</td>
-            </tr>
-            """
-            
-            parts_for = html.split('{% for row in recent %}')
-            parts_end = html.split('{% endfor %}')
-            
-            if len(parts_for) > 1 and len(parts_end) > 1:
-                final_html = parts_for[0] + rows_html + parts_end[1]
-            else:
-                final_html = html 
-                
-            return final_html
+        if full:
+            mode_btn_html = '<button class="refresh-btn" style="background: var(--bg); color: var(--text); border: 1px solid var(--border); margin-right: 0.5rem;" onclick="window.location.href=\'/dashboard\'">Switch to Lite View</button>'
+        else:
+            mode_btn_html = '<button class="refresh-btn" style="background: var(--accent); color: white; margin-right: 0.5rem;" onclick="window.location.href=\'/dashboard?full=True\'">Load 90-Day Analytics</button>'
 
-    try:
-        # Wrap with timeout
-        final_html = await asyncio.wait_for(build_dashboard(), timeout=7.0)
-        
-        # Cache for 60s (Lite) or 300s (Full)
-        ttl = 300 if full else 60
+        html = html.replace(
+            '<button class="refresh-btn" onclick="window.location.href=\'/dashboard?refresh=True\'">Refresh Data</button>',
+            f'{mode_btn_html}<button class="refresh-btn" onclick="window.location.href=\'/dashboard?refresh=True&full={full}\'">Refresh Data</button>',
+        )
+        html = html.replace(
+            "Real-time Claude token savings dashboard",
+            f"Real-time Claude token savings dashboard | <strong>{view_name}</strong>",
+        )
+
+        rows_html = ""
+        for r in processed_recent:
+            badge = '<span class="badge badge-cached">CACHED</span>' if r["cache_read"] > 0 else '<span class="badge badge-miss">MISS</span>'
+            rows_html += (
+                f"<tr>"
+                f"<td>{r['timestamp']}</td>"
+                f'<td style="font-family: monospace; font-size: 0.75rem;">{r["model"]}</td>'
+                f"<td>{badge}</td>"
+                f"<td>{r['input']}</td>"
+                f'<td style="color: #10b981;">{r["cache_read"]}</td>'
+                f'<td style="color: #3b82f6;">{r["gateway_saved"]}</td>'
+                f"<td>{r['output']}</td>"
+                f"<td>{r['savings_pct']}%</td>"
+                f"</tr>\n"
+            )
+
+        parts_for = html.split("{% for row in recent %}")
+        parts_end = html.split("{% endfor %}")
+        if len(parts_for) > 1 and len(parts_end) > 1:
+            final_html = parts_for[0] + rows_html + parts_end[1]
+        else:
+            final_html = html
+
+        ttl = 300 if full else 120
         if rds:
             try:
                 rds.setex(cache_key, ttl, final_html)
-                rds.delete(lock_key)
             except Exception:
                 pass
+        log.info("Dashboard %s built and cached (ttl=%ds)", mode_label, ttl)
 
-        return HTMLResponse(content=final_html)
-
-    except asyncio.TimeoutError:
-        import logging
-        logging.getLogger("gateway").error("Dashboard build timed out after 7s")
-        
-        # Clear building lock
-        if rds:
-            try:
-                rds.delete(lock_key)
-            except Exception:
-                pass
-        
-        # Return loading page with auto-refresh
-        return HTMLResponse(
-            content="""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta http-equiv="refresh" content="5">
-    <title>Dashboard Loading...</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
-    <style>
-        body { font-family: 'Inter', sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
-        .box { background: #1e293b; border: 1px solid #334155; border-radius: 1rem; padding: 2.5rem; max-width: 520px; text-align: center; }
-        h1 { font-size: 1.5rem; margin-bottom: 0.5rem; color: #f59e0b; }
-        p { color: #94a3b8; line-height: 1.6; }
-        .spinner { border: 4px solid #334155; border-top: 4px solid #f59e0b; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 1.5rem auto; }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        .btn { background: #38bdf8; color: #000; border: none; padding: 0.5rem 1rem; border-radius: 0.5rem; font-weight: 600; cursor: pointer; margin-top: 1rem; text-decoration: none; display: inline-block; }
-    </style>
-</head>
-<body>
-    <div class="box">
-        <h1>⏱️ Dashboard Taking Longer Than Expected</h1>
-        <div class="spinner"></div>
-        <p>Your dashboard is computing analytics over a large dataset. This page will auto-refresh in 5 seconds.</p>
-        <p style="font-size: 0.875rem; margin-top: 1rem;">If this persists, try the <a href="/dashboard" class="btn">Lite View (24h)</a> for faster results.</p>
-    </div>
-</body>
-</html>
-""",
-            status_code=200
-        )
-    except Exception as e:
+    except Exception:
         import traceback
-        err_msg = traceback.format_exc()
-        import logging
-        logging.getLogger("gateway").error("CRITICAL DASHBOARD ERROR: %s", err_msg)
-        
-        # Clear building lock
-        if rds:
-            try:
-                rds.delete(lock_key)
-            except Exception:
-                pass
-        
-        return HTMLResponse(
-            content=f"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Dashboard Error</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
-    <style>
-        body {{ font-family: 'Inter', sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; }}
-        .box {{ background: #1e293b; border: 1px solid #334155; border-radius: 1rem; padding: 2rem; max-width: 800px; margin: 0 auto; }}
-        h1 {{ color: #ef4444; margin-bottom: 1rem; }}
-        .btn {{ background: #38bdf8; color: #000; padding: 0.5rem 1rem; border-radius: 0.5rem; text-decoration: none; display: inline-block; margin-top: 1rem; }}
-        pre {{ color: #94a3b8; background: #0f172a; padding: 1rem; border-radius: 0.5rem; overflow-x: auto; font-size: 0.75rem; }}
-    </style>
-</head>
-<body>
-    <div class="box">
-        <h1>⚠️ Dashboard Error</h1>
-        <p>The dashboard encountered an error. Try the <a href="/dashboard" class="btn">Lite View</a> for faster results.</p>
-        <pre>{err_msg}</pre>
-    </div>
-</body>
-</html>
-""",
-            status_code=500
-        )
+        log.error("Background dashboard build failed:\n%s", traceback.format_exc())
+    finally:
+        _background_tasks.pop(task_key, None)
+
+
+def _ensure_bg_build(full: bool):
+    """Kick off a background build if one is not already running."""
+    task_key = f"bg_{'full' if full else 'lite'}"
+    existing = _background_tasks.get(task_key)
+    if existing and not existing.done():
+        return
+    task = asyncio.create_task(_build_and_cache(full))
+    _background_tasks[task_key] = task
+
+
+@router.get("/dashboard", response_class=HTMLResponse)
+async def get_dashboard(request: Request, refresh: bool = False, full: bool = False):
+    from gateway.db import async_session_factory
+    from gateway.cache import rds
+
+    mode_label = "full" if full else "lite"
+    cache_key = f"dashboard_html_{mode_label}_v4"
+
+    if async_session_factory is None:
+        return HTMLResponse(content=NO_DB_HTML, status_code=200)
+
+    # 1. Serve from cache (unless explicit refresh)
+    if rds and not refresh:
+        try:
+            cached_html = rds.get(cache_key)
+            if cached_html:
+                return HTMLResponse(content=cached_html)
+        except Exception:
+            pass
+
+    # 2. No cache hit -- kick off background build and return loading page
+    _ensure_bg_build(full)
+    return HTMLResponse(content=LOADING_HTML, status_code=200)
