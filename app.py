@@ -38,13 +38,21 @@ async def lifespan(app: FastAPI):
         log.warning("Could not clear Redis concurrency slots: %r", e)
 
     if DATABASE_URL:
-        try:
-            from gateway.db import init_db, create_tables
-            init_db()
-            await create_tables()
-            log.info("Database initialized successfully")
-        except Exception as e:
-            log.warning("Database initialization failed: %r", e)
+        import asyncio
+        from gateway.db import init_db, create_tables
+        init_db()
+        for attempt in range(3):
+            try:
+                await asyncio.wait_for(create_tables(), timeout=15)
+                log.info("Database initialized successfully")
+                break
+            except (asyncio.TimeoutError, Exception) as e:
+                if attempt < 2:
+                    wait = (attempt + 1) * 3
+                    log.warning("Database init attempt %d failed: %r, retrying in %ds", attempt + 1, e, wait)
+                    await asyncio.sleep(wait)
+                else:
+                    log.warning("Database initialization failed after 3 attempts: %r (gateway will run without DB)", e)
     
     yield
 
