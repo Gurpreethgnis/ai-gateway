@@ -111,6 +111,156 @@ def find_important_messages(messages: List[Dict[str, Any]]) -> List[int]:
     return sorted(important_indices)
 
 
+def has_tool_result_blocks(content: Any) -> bool:
+    """Check if message content contains tool_result blocks."""
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(block, dict) and (
+            block.get("type") == "tool_result" or
+            block.get("tool_use_id") or
+            block.get("tool_result_for")
+        )
+        for block in content
+    )
+
+
+def has_tool_use_blocks(content: Any) -> bool:
+    """Check if message content contains tool_use blocks."""
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(block, dict) and block.get("type") == "tool_use"
+        for block in content
+    )
+
+
+def get_tool_use_ids(messages: List[Dict[str, Any]], indices: List[int]) -> set:
+    """Get all tool_use IDs from assistant messages at given indices."""
+    tool_use_ids = set()
+    for i in indices:
+        if i >= len(messages):
+            continue
+        msg = messages[i]
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content", [])
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tool_id = block.get("id")
+                    if tool_id:
+                        tool_use_ids.add(tool_id)
+    return tool_use_ids
+
+
+def get_tool_result_ids(message: Dict[str, Any]) -> set:
+    """Get all tool_use_ids referenced in tool_result blocks."""
+    result_ids = set()
+    content = message.get("content", [])
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict):
+                tool_id = block.get("tool_use_id") or block.get("tool_result_for")
+                if tool_id:
+                    result_ids.add(tool_id)
+    return result_ids
+
+
+def find_tool_use_message(messages: List[Dict[str, Any]], tool_use_id: str) -> int:
+    """Find the index of the assistant message containing the given tool_use_id."""
+    for i, msg in enumerate(messages):
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content", [])
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    if block.get("id") == tool_use_id:
+                        return i
+    return -1
+
+
+def ensure_tool_pairs(
+    messages: List[Dict[str, Any]],
+    keep_indices: List[int],
+) -> List[int]:
+    """
+    Ensure that for every tool_result in kept messages, the corresponding
+    tool_use message is also kept. Returns expanded list of indices.
+    """
+    keep_set = set(keep_indices)
+    
+    # For each message we're keeping, check for tool_results
+    for i in list(keep_set):
+        if i >= len(messages):
+            continue
+        msg = messages[i]
+        result_ids = get_tool_result_ids(msg)
+        
+        # Find the assistant message with corresponding tool_use
+        for tool_id in result_ids:
+            tool_use_idx = find_tool_use_message(messages, tool_id)
+            if tool_use_idx >= 0 and tool_use_idx not in keep_set:
+                keep_set.add(tool_use_idx)
+    
+    return sorted(keep_set)
+
+
+def strip_orphaned_tool_results(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Remove tool_result blocks that don't have a corresponding tool_use in previous messages.
+    This ensures Anthropic API doesn't reject the request.
+    """
+    # Build set of all tool_use IDs from assistant messages
+    available_tool_use_ids = set()
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            content = msg.get("content", [])
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        tool_id = block.get("id")
+                        if tool_id:
+                            available_tool_use_ids.add(tool_id)
+    
+    # Filter messages to remove orphaned tool_results
+    result = []
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", [])
+        
+        # Only process user messages with list content (potential tool_results)
+        if role == "user" and isinstance(content, list):
+            # Filter out orphaned tool_result blocks
+            filtered_blocks = []
+            for block in content:
+                if isinstance(block, dict):
+                    tool_id = block.get("tool_use_id") or block.get("tool_result_for")
+                    if tool_id:
+                        # This is a tool_result block - check if tool_use exists
+                        if tool_id in available_tool_use_ids:
+                            filtered_blocks.append(block)
+                        else:
+                            log.debug("Stripping orphaned tool_result: %s", tool_id)
+                    else:
+                        # Not a tool_result block, keep it
+                        filtered_blocks.append(block)
+                else:
+                    filtered_blocks.append(block)
+            
+            # Only add message if it has content left
+            if filtered_blocks:
+                result.append({**msg, "content": filtered_blocks})
+            else:
+                # Replace empty message with placeholder to maintain conversation flow
+                result.append({"role": "user", "content": "(previous context)"})
+        else:
+            result.append(msg)
+    
+    return result
+
+
 async def prune_context(
     messages: List[Dict[str, Any]],
     max_tokens: int = CONTEXT_MAX_TOKENS,
@@ -155,29 +305,43 @@ async def prune_context(
     pruned.extend(system_messages)
 
     keep_recent = 10
-    recent_messages = regular_messages[-keep_recent:] if len(regular_messages) > keep_recent else regular_messages
+    recent_start_idx = max(0, len(regular_messages) - keep_recent)
+    recent_indices = list(range(recent_start_idx, len(regular_messages)))
+    
+    # Ensure tool pairs are preserved for recent messages
+    recent_indices = ensure_tool_pairs(regular_messages, recent_indices)
+    recent_messages = [regular_messages[i] for i in recent_indices if i < len(regular_messages)]
 
     if len(regular_messages) > keep_recent:
-        dropped = regular_messages[:-keep_recent]
+        # Messages not in recent set
+        dropped_indices = [i for i in range(len(regular_messages)) if i not in recent_indices]
+        dropped = [regular_messages[i] for i in dropped_indices]
 
-        important = find_important_messages(dropped)
-        important_msgs = [dropped[i] for i in important if i < len(dropped)]
+        if dropped:
+            important = find_important_messages(dropped)
+            important_msgs = [dropped[i] for i in important if i < len(dropped)]
 
-        summary_text = create_summary_block(dropped)
+            summary_text = create_summary_block(dropped)
 
-        if estimate_tokens(summary_text) < estimate_messages_tokens(dropped) // 2:
-            pruned.append({
-                "role": "user",
-                "content": f"[Previous conversation summary ({len(dropped)} messages):\n{summary_text}]",
-            })
+            if estimate_tokens(summary_text) < estimate_messages_tokens(dropped) // 2:
+                pruned.append({
+                    "role": "user",
+                    "content": f"[Previous conversation summary ({len(dropped)} messages):\n{summary_text}]",
+                })
 
-            for imp_msg in important_msgs[:3]:
-                pruned.append(imp_msg)
+                # Don't add important messages that might have orphaned tool_results
+                # Just add non-tool messages
+                for imp_msg in important_msgs[:3]:
+                    if not has_tool_result_blocks(imp_msg.get("content")):
+                        pruned.append(imp_msg)
 
-            meta["summarized_messages"] = len(dropped)
-            meta["kept_important"] = len(important_msgs[:3])
+                meta["summarized_messages"] = len(dropped)
+                meta["kept_important"] = min(3, len(important_msgs))
 
     pruned.extend(recent_messages)
+    
+    # Final safety: strip any orphaned tool_results that slipped through
+    pruned = strip_orphaned_tool_results(pruned)
 
     final_tokens = estimate_messages_tokens(pruned) + system_tokens
 
@@ -191,8 +355,15 @@ async def prune_context(
         while len(pruned) > 3 and estimate_messages_tokens(pruned) + system_tokens > max_tokens:
             for i, msg in enumerate(pruned):
                 if msg.get("role") not in ("system", "developer"):
+                    # Don't remove if it would orphan tool_results
+                    if msg.get("role") == "assistant" and has_tool_use_blocks(msg.get("content")):
+                        # Check if next message has tool_results for this
+                        continue
                     pruned.pop(i)
                     break
+        
+        # Re-strip orphaned tool_results after aggressive pruning
+        pruned = strip_orphaned_tool_results(pruned)
 
     meta["final_messages"] = len(pruned)
     meta["final_tokens"] = estimate_messages_tokens(pruned) + system_tokens
