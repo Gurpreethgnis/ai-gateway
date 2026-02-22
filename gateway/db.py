@@ -189,22 +189,17 @@ async def create_tables():
             
         # Make cache-related columns nullable if they exist
         try:
+            await conn.execute(text("ALTER TABLE usage_records ALTER COLUMN cache_read_input_tokens DROP NOT NULL"))
+        except Exception:
+            pass  # column may not exist or already nullable
+        try:
+            await conn.execute(text("ALTER TABLE usage_records ALTER COLUMN cache_creation_input_tokens DROP NOT NULL"))
+        except Exception:
+            pass  # column may not exist or already nullable
+        try:
             await conn.execute(text("ALTER TABLE usage_records ALTER COLUMN gateway_tokens_saved DROP NOT NULL"))
         except Exception:
             pass  # column may not exist or already nullable
-
-        # Add indexes for aggregation performance
-        idx_cmds = [
-            "CREATE INDEX IF NOT EXISTS ix_usage_input_tokens ON usage_records (input_tokens)",
-            "CREATE INDEX IF NOT EXISTS ix_usage_cost_usd ON usage_records (cost_usd)",
-            "CREATE INDEX IF NOT EXISTS ix_usage_cache_read ON usage_records (cache_read_input_tokens)",
-            "CREATE INDEX IF NOT EXISTS ix_usage_gateway_saved ON usage_records (gateway_tokens_saved)"
-        ]
-        for cmd in idx_cmds:
-            try:
-                await conn.execute(text(cmd))
-            except Exception:
-                pass
 
 
 @asynccontextmanager
