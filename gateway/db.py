@@ -52,14 +52,6 @@ class UsageRecord(Base):
 
     __table_args__ = (
         Index("ix_usage_project_timestamp", "project_id", "timestamp"),
-        Index(
-            "ix_usage_dashboard_agg",
-            "timestamp",
-            "input_tokens",
-            "cost_usd",
-            "cache_read_input_tokens",
-            "gateway_tokens_saved",
-        ),
     )
 
 
@@ -240,6 +232,33 @@ def hash_api_key(api_key: str) -> str:
     return hashlib.sha256(api_key.encode()).hexdigest()
 
 
+def _increment_dashboard_counters(
+    input_tokens: int,
+    output_tokens: int,
+    cache_read: int,
+    gateway_saved: int,
+    cost_usd: float,
+):
+    """Atomically increment Redis counters for dashboard stats. Never blocks or raises."""
+    try:
+        from gateway.cache import rds
+        if not rds:
+            return
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        pipe = rds.pipeline()
+        for key in [f"dashboard:stats:{today}", "dashboard:stats:all_time"]:
+            pipe.hincrby(key, "input_tokens", input_tokens)
+            pipe.hincrby(key, "output_tokens", output_tokens)
+            pipe.hincrby(key, "cached_tokens", cache_read)
+            pipe.hincrby(key, "gateway_saved", gateway_saved)
+            pipe.hincrbyfloat(key, "cost_usd", cost_usd)
+            pipe.hincrby(key, "request_count", 1)
+        pipe.expire(f"dashboard:stats:{today}", 172800)
+        pipe.execute()
+    except Exception:
+        pass
+
+
 async def record_usage_to_db(
     project_id,
     model: str,
@@ -256,6 +275,15 @@ async def record_usage_to_db(
     
     try:
         cost = calculate_cost(model, input_tokens, output_tokens)
+        
+        _increment_dashboard_counters(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read=cache_read_input_tokens,
+            gateway_saved=gateway_tokens_saved,
+            cost_usd=cost,
+        )
+        
         async with get_session() as session:
             record = UsageRecord(
                 project_id=project_id,

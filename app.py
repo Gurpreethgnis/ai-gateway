@@ -45,7 +45,56 @@ async def lifespan(app: FastAPI):
             log.info("Database initialized successfully")
         except Exception as e:
             log.warning("Database initialization failed: %r", e)
+    
+    # One-time backfill of dashboard counters from existing usage_records
+    try:
+        from gateway.cache import rds
+        if rds and DATABASE_URL:
+            if not rds.exists("dashboard:stats:all_time"):
+                log.info("Backfilling dashboard counters from existing usage_records...")
+                await _backfill_dashboard_counters()
+    except Exception as e:
+        log.warning("Dashboard backfill failed (non-critical): %r", e)
+    
     yield
+
+
+async def _backfill_dashboard_counters():
+    """One-time backfill of Redis counters from existing usage_records."""
+    from gateway.db import get_session
+    from gateway.cache import rds
+    from sqlalchemy import text
+    
+    if not rds:
+        return
+    
+    try:
+        async with get_session() as session:
+            row = (await session.execute(text("""
+                SELECT COALESCE(SUM(input_tokens), 0),
+                       COALESCE(SUM(output_tokens), 0),
+                       COALESCE(SUM(cache_read_input_tokens), 0),
+                       COALESCE(SUM(gateway_tokens_saved), 0),
+                       COALESCE(SUM(cost_usd), 0),
+                       COUNT(*)
+                  FROM usage_records
+            """))).fetchone()
+            
+            if row:
+                input_tok, output_tok, cached, gw_saved, cost, count = row
+                pipe = rds.pipeline()
+                pipe.hset("dashboard:stats:all_time", mapping={
+                    "input_tokens": int(input_tok),
+                    "output_tokens": int(output_tok),
+                    "cached_tokens": int(cached),
+                    "gateway_saved": int(gw_saved),
+                    "cost_usd": float(cost),
+                    "request_count": int(count),
+                })
+                pipe.execute()
+                log.info("Backfilled dashboard counters: %d requests, %d input tokens", int(count), int(input_tok))
+    except Exception as e:
+        log.warning("Backfill query failed: %r", e)
 
 
 app = FastAPI(lifespan=lifespan)
