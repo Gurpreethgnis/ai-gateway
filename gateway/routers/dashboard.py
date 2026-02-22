@@ -273,13 +273,14 @@ def _get_stats_from_redis(full: bool) -> dict:
 
 
 async def _get_recent_requests(limit: int = 20) -> list[dict]:
-    """Fetch recent requests from DB. Fast query using timestamp index."""
+    """Fetch recent requests from DB with strict timeout. Returns empty list on any issue."""
+    import asyncio
     from gateway.db import async_session_factory
     
     if not async_session_factory:
         return []
     
-    try:
+    async def _query():
         async with get_session() as session:
             result = await session.execute(
                 select(UsageRecord).order_by(UsageRecord.timestamp.desc()).limit(limit)
@@ -302,6 +303,12 @@ async def _get_recent_requests(limit: int = 20) -> list[dict]:
                     "savings_pct": f"{sav_pct:.1f}",
                 })
             return rows
+    
+    try:
+        return await asyncio.wait_for(_query(), timeout=3.0)
+    except asyncio.TimeoutError:
+        log.warning("Recent requests query timed out (3s) - skipping table")
+        return []
     except Exception as e:
         log.warning("Failed to fetch recent requests: %r", e)
         return []

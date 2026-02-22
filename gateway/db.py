@@ -168,7 +168,7 @@ def init_db():
         pool_recycle=300,
         connect_args={
             "server_settings": {
-                "statement_timeout": "30000"
+                "statement_timeout": "5000"
             }
         }
     )
