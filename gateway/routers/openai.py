@@ -544,7 +544,7 @@ async def openai_chat_completions(req: Request):
         if aa_tool_choice:
             payload["tool_choice"] = aa_tool_choice
 
-    do_cache = temperature <= 0.3
+    do_cache = temperature <= 0.3 and not request.headers.get("X-No-Cache")
     key = cache_key(payload) if do_cache else None
 
     if key:
