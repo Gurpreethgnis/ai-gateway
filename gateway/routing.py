@@ -21,11 +21,11 @@ def with_model_prefix(m: str) -> str:
     base = strip_model_prefix(m) or ""
     return f"{MODEL_PREFIX}{base}"
 
-# Known model IDs; used for validation. New Anthropic IDs (e.g. claude-4-6-*) are passed through.
 VALID_ANTHROPIC_MODELS = {
     "claude-sonnet-4-0",
     "claude-opus-4-5",
     "claude-3-5-sonnet-20241022",
+    "claude-3-5-haiku-20241022",
     "claude-3-opus-20240229",
     "claude-3-sonnet-20240229",
     "claude-3-haiku-20240307",
@@ -71,41 +71,35 @@ def map_model_alias(maybe: Optional[str]) -> Optional[str]:
 
     return None
 
-# Model Fallback Chains (Rotation)
-# Used when a model hits its hourly or concurrent rate limit (429).
 MODEL_FALLBACKS = {
-    # Sonnet 3.5 Chain
+    # Sonnet 4 chain
+    "claude-sonnet-4-0": [
+        "claude-3-5-sonnet-20241022",
+        "claude-3-5-haiku-20241022",
+    ],
+    # Sonnet 3.5 chain
     "claude-3-5-sonnet-20241022": [
-        "claude-3-5-sonnet-20240620",
-        "claude-3-5-sonnet-latest",
-        "claude-3-haiku-20240307",
+        "claude-sonnet-4-0",
+        "claude-3-5-haiku-20241022",
     ],
-    "claude-3-5-sonnet-20240620": [
+    # Opus chain
+    "claude-opus-4-5": [
+        "claude-sonnet-4-0",
         "claude-3-5-sonnet-20241022",
-        "claude-3-5-sonnet-latest",
-        "claude-3-haiku-20240307",
     ],
-    "claude-3-5-sonnet-latest": [
-        "claude-3-5-sonnet-20241022",
-        "claude-3-5-sonnet-20240620",
-        "claude-3-haiku-20240307",
-    ],
-    
-    # Opus Chain
     "claude-3-opus-20240229": [
-        "claude-3-5-sonnet-20241022",
-        "claude-3-haiku-20240307",
-    ],
-    "claude-3-opus-latest": [
-        "claude-3-opus-20240229",
+        "claude-sonnet-4-0",
         "claude-3-5-sonnet-20241022",
     ],
-
-    # Haiku Chain
+    # Haiku chain
+    "claude-3-5-haiku-20241022": [
+        "claude-3-5-sonnet-20241022",
+        "claude-sonnet-4-0",
+    ],
     "claude-3-haiku-20240307": [
-        "claude-3-5-haiku-20241022",  # if available
-        "claude-3-5-sonnet-20240620",
-    ]
+        "claude-3-5-haiku-20241022",
+        "claude-3-5-sonnet-20241022",
+    ],
 }
 
 def get_fallback_model(current_model: str, attempt: int) -> str:
@@ -117,8 +111,7 @@ def get_fallback_model(current_model: str, attempt: int) -> str:
     chain = MODEL_FALLBACKS.get(base, [])
     
     if not chain:
-        # Generic fallback for unknown models
-        return "claude-3-haiku-20240307" if attempt > 0 else current_model
+        return "claude-3-5-haiku-20241022" if attempt > 0 else current_model
 
     # Use modulo to cycle through the chain if multiple retries happen
     fallback_idx = (attempt - 1) % len(chain)

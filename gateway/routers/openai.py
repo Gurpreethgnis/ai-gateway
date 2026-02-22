@@ -303,6 +303,11 @@ async def openai_chat_completions(req: Request):
     ray = req.headers.get("cf-ray") or ""
     t0 = time.time()
 
+    # Header override: X-Gateway-Provider: local forces Ollama regardless of smart routing
+    provider_override = req.headers.get("x-gateway-provider", "").strip().lower()
+    if provider_override == "local":
+        parsed["provider"] = "local"
+
     if is_local_provider_request(parsed):
         return await handle_local_provider(parsed, ray, t0)
 

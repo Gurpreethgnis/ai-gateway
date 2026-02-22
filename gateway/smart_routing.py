@@ -204,9 +204,10 @@ def compute_routing_signals(
     
     # ========== FORCE CLAUDE (high confidence) ==========
     
-    # Active tool-use loop: check if the LAST user message contains tool_result blocks
-    # (this means we're mid-loop processing tool output, need Claude)
-    # Historical tool_results from earlier messages are irrelevant to current routing
+    # Active tool-use loop: if the LAST user message has tool_result blocks AND
+    # no new user text, we're mid-loop processing tool output -> need Claude.
+    # But if the user typed a new question alongside tool results, the question
+    # takes priority and we continue to evaluate it below.
     last_user_msg = None
     for msg in reversed(messages):
         if msg.get("role") == "user":
@@ -216,14 +217,21 @@ def compute_routing_signals(
     if last_user_msg:
         content = last_user_msg.get("content", "")
         if isinstance(content, list):
+            has_tool_result = False
+            has_user_text = False
             for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_result":
-                    return RoutingSignals(
-                        band="CLAUDE",
-                        confidence=1.0,
-                        reasons=["active_tool_result_blocks"],
-                        fallback_tier="sonnet"
-                    )
+                if isinstance(block, dict):
+                    if block.get("type") == "tool_result":
+                        has_tool_result = True
+                    elif block.get("type") == "text" and block.get("text", "").strip():
+                        has_user_text = True
+            if has_tool_result and not has_user_text:
+                return RoutingSignals(
+                    band="CLAUDE",
+                    confidence=1.0,
+                    reasons=["active_tool_loop_no_user_text"],
+                    fallback_tier="sonnet"
+                )
     
     # Tools/functions present and last message wasn't a simple question - need Claude for tool use
     if tools:
