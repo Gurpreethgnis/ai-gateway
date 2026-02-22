@@ -792,15 +792,26 @@ async def openai_chat_completions(req: Request):
                                                            final_usage.get("output_tokens", 0) if final_usage else 0))
 
                     if final_usage:
+                        cache_read_tokens = final_usage.get("cache_read_input_tokens", 0)
+                        cache_write_tokens = final_usage.get("cache_creation_input_tokens", 0)
+                        
                         await record_usage_to_db(
                             project_id, model,
                             final_usage.get("input_tokens", 0),
                             final_usage.get("output_tokens", 0),
                             ray, False,
-                            final_usage.get("cache_read_input_tokens", 0),
-                            final_usage.get("cache_creation_input_tokens", 0),
+                            cache_read_tokens,
+                            cache_write_tokens,
                             gateway_tokens_saved
                         )
+                        
+                        # Record Anthropic prompt cache metrics
+                        if cache_read_tokens > 0:
+                            from gateway.metrics import record_prompt_cache_tokens
+                            record_prompt_cache_tokens("read", project_name or "default", cache_read_tokens)
+                        if cache_write_tokens > 0:
+                            from gateway.metrics import record_prompt_cache_tokens
+                            record_prompt_cache_tokens("write", project_name or "default", cache_write_tokens)
 
                     finished = True
 
@@ -949,12 +960,23 @@ async def openai_chat_completions(req: Request):
         stream=False,
     )
 
+    cache_read_tokens = usage.get("cache_read_input_tokens", 0) if usage else 0
+    cache_write_tokens = usage.get("cache_creation_input_tokens", 0) if usage else 0
+    
     await record_usage_to_db(
         project_id, model, input_tokens, output_tokens, ray, False,
-        usage.get("cache_read_input_tokens", 0) if usage else 0,
-        usage.get("cache_creation_input_tokens", 0) if usage else 0,
+        cache_read_tokens,
+        cache_write_tokens,
         gateway_tokens_saved
     )
+    
+    # Record Anthropic prompt cache metrics
+    if cache_read_tokens > 0:
+        from gateway.metrics import record_prompt_cache_tokens
+        record_prompt_cache_tokens("read", project_name or "default", cache_read_tokens)
+    if cache_write_tokens > 0:
+        from gateway.metrics import record_prompt_cache_tokens
+        record_prompt_cache_tokens("write", project_name or "default", cache_write_tokens)
 
     if ENABLE_MEMORY_LAYER and project_id and out_text and len(out_text) > 200:
         try:
