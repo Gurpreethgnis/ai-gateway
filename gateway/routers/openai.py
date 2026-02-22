@@ -589,18 +589,49 @@ async def openai_chat_completions(req: Request):
     system_text, meta = strip_or_truncate("system", system_text, LIMITS["system_max"], allow_strip=False)
     track_reduction(meta)
     
-    # Skills system: check for X-Gateway-Skill header and prepend skill prompt
-    skill_header = req.headers.get("x-gateway-skill")
+    # Skills system: check header, body, or system prompt for skill activation
+    # Priority: header > body field > system prompt trigger
+    skill_id = req.headers.get("x-gateway-skill")
+    if not skill_id:
+        # Check body for skill field (allows Cursor to pass skill in request)
+        skill_id = parsed.get("skill") or parsed.get("gateway_skill")
+    if not skill_id:
+        # Check for @skill-name pattern at start of system prompt or last user message
+        import re
+        skill_pattern = r"@([\w-]+)\s"
+        # Check system prompt
+        if system_text:
+            match = re.match(skill_pattern, system_text)
+            if match:
+                potential_skill = match.group(1)
+                from gateway.skills import get_skill
+                if get_skill(potential_skill):
+                    skill_id = potential_skill
+                    # Remove the @skill trigger from system prompt
+                    system_text = re.sub(r"^@[\w-]+\s*", "", system_text)
+        # Check last user message
+        if not skill_id and aa_messages:
+            last_user = next((m for m in reversed(aa_messages) if m.get("role") == "user"), None)
+            if last_user:
+                content = last_user.get("content", "")
+                if isinstance(content, str):
+                    match = re.match(skill_pattern, content)
+                    if match:
+                        potential_skill = match.group(1)
+                        from gateway.skills import get_skill
+                        if get_skill(potential_skill):
+                            skill_id = potential_skill
+    
     skill_forced_tier = None
-    if skill_header:
+    if skill_id:
         from gateway.config import ENABLE_SKILLS
         if ENABLE_SKILLS:
             from gateway.skills import apply_skill_to_system_prompt, get_skill_forced_tier
             original_system_text = system_text
-            system_text = apply_skill_to_system_prompt(system_text, skill_header)
+            system_text = apply_skill_to_system_prompt(system_text, skill_id)
             if system_text != original_system_text:
-                log.info("Skill applied: %s", skill_header)
-                skill_forced_tier = get_skill_forced_tier(skill_header)
+                log.info("Skill applied: %s", skill_id)
+                skill_forced_tier = get_skill_forced_tier(skill_id)
                 if skill_forced_tier:
                     log.info("Skill forces tier: %s", skill_forced_tier)
 
@@ -1332,3 +1363,45 @@ async def openai_models(req: Request):
 @router.get("/models")
 async def models_alias(req: Request):
     return await openai_models(req)
+
+
+@router.get("/v1/skills")
+@router.get("/skills")
+async def list_skills_endpoint(req: Request):
+    """
+    List available gateway skills that can be activated.
+    
+    Skills can be activated by:
+    1. HTTP header: X-Gateway-Skill: brainstorming
+    2. Request body field: {"skill": "brainstorming", ...}
+    3. System prompt trigger: @brainstorming at the start
+    4. User message trigger: @brainstorming at the start of your message
+    """
+    from gateway.config import ENABLE_SKILLS
+    from gateway.skills import SKILLS
+    
+    if not ENABLE_SKILLS:
+        return {
+            "enabled": False,
+            "skills": [],
+            "message": "Skills system is disabled. Set ENABLE_SKILLS=1 to enable."
+        }
+    
+    skills_list = []
+    for skill_id, skill_data in SKILLS.items():
+        skills_list.append({
+            "id": skill_id,
+            "description": skill_data.get("description", ""),
+            "force_tier": skill_data.get("force_tier"),
+        })
+    
+    return {
+        "enabled": True,
+        "skills": skills_list,
+        "activation_methods": [
+            "Header: X-Gateway-Skill: <skill-id>",
+            "Body: {\"skill\": \"<skill-id>\", ...}",
+            "System prompt: @<skill-id> at the start",
+            "User message: @<skill-id> at the start of message",
+        ]
+    }

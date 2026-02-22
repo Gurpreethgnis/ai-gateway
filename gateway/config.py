@@ -86,7 +86,7 @@ ROUTING_CLASSIFIER_CACHE_SIZE = int(os.getenv("ROUTING_CLASSIFIER_CACHE_SIZE", "
 LOCAL_CONTEXT_CHAR_LIMIT = int(os.getenv("LOCAL_CONTEXT_CHAR_LIMIT", "30000"))  # max chars routable to local
 
 # Cascade Routing (try local first, escalate if quality check fails)
-ENABLE_CASCADE_ROUTING = os.getenv("ENABLE_CASCADE_ROUTING", "0") == "1"
+ENABLE_CASCADE_ROUTING = os.getenv("ENABLE_CASCADE_ROUTING", "1") == "1"
 CASCADE_QUALITY_CHECK_MODE = os.getenv("CASCADE_QUALITY_CHECK_MODE", "heuristic")  # "heuristic" | "llm" | "none"
 CASCADE_MIN_RESPONSE_LENGTH = int(os.getenv("CASCADE_MIN_RESPONSE_LENGTH", "100"))
 CASCADE_LOG_OUTCOMES = os.getenv("CASCADE_LOG_OUTCOMES", "1") == "1"
