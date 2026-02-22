@@ -247,6 +247,132 @@ X-RateLimit-Remaining: 59      # Rate limit status
 
 ---
 
+## Cascade Routing
+
+**New Feature:** FrugalGPT-style cascade routing tries cheaper models first, escalates only when needed.
+
+### How It Works
+
+```mermaid
+flowchart LR
+    Request --> Local[Try Local Ollama]
+    Local --> Quality{Quality Check}
+    Quality -->|Pass| Return[Return Local Response]
+    Quality -->|Fail| Escalate[Escalate to Claude]
+    Escalate --> Claude[Claude Sonnet/Opus]
+    Claude --> Return
+```
+
+1. **Route:** Smart routing decides initial tier (local/sonnet/opus)
+2. **Try Local:** If tier is "local", call Ollama first
+3. **Quality Check:** Fast heuristics verify response quality
+4. **Escalate:** If quality fails, escalate to Claude
+5. **Learn:** Log outcomes to train future learned router
+
+### Configuration
+
+```bash
+# Enable cascade routing (default: disabled)
+ENABLE_CASCADE_ROUTING=1
+
+# Quality check mode: "heuristic" (fast), "llm" (ask model to self-assess), "none" (always pass)
+CASCADE_QUALITY_CHECK_MODE=heuristic
+
+# Minimum response length for quality pass
+CASCADE_MIN_RESPONSE_LENGTH=100
+
+# Log routing outcomes for training data (default: enabled)
+CASCADE_LOG_OUTCOMES=1
+```
+
+### Quality Checks
+
+**Heuristic mode (< 50ms overhead):**
+- Response length vs query complexity
+- Refusal patterns ("I don't know", "I can't help")
+- Code blocks present when code requested
+- No excessive repetition
+- Reasonable sentence structure
+
+### Outcome Logging
+
+Cascade logs routing decisions to `routing_outcomes` table:
+- Initial tier (from Phase 1/2 routing)
+- Final tier (after cascade/escalation)
+- Whether escalated and why
+- Quality score, latency, success
+
+**Use case:** Train a learned router (RouteLLM, RoRF) using this data.
+
+---
+
+## Skills System
+
+**New Feature:** Curated prompt templates for structured workflows, invokable via header.
+
+### Available Skills
+
+| Skill ID | Purpose | Use When |
+|----------|---------|----------|
+| `brainstorming` | Structured feature planning | Before writing new code |
+| `systematic-debugging` | Methodical bug analysis | Stuck on an issue |
+| `code-review` | Thorough review checklist | Before committing |
+| `git-pushing` | Safe commit workflow | Ready to push |
+| `concise-planning` | Break down large tasks | Large feature work |
+| `architecture-review` | System design analysis | Architecture decisions |
+| `quick-fix` | Minimal changes for simple issues | Typos, small bugs |
+| `security-audit` | Vulnerability scan | Security concerns |
+
+### Usage
+
+Send `X-Gateway-Skill` header with skill ID:
+
+```bash
+curl -X POST https://your-gateway/v1/chat/completions \
+  -H "Authorization: Bearer $GATEWAY_API_KEY" \
+  -H "X-Gateway-Skill: brainstorming" \
+  -d '{
+    "messages": [{"role": "user", "content": "I want to add user authentication"}]
+  }'
+```
+
+**From Cursor/Continue:**
+
+Set a custom header in your IDE settings or use a wrapper script that adds the header.
+
+### How It Works
+
+1. Gateway detects `X-Gateway-Skill` header
+2. Looks up skill prompt template from `gateway/skills.py`
+3. **Prepends skill prompt to system prompt** before routing
+4. Request proceeds normally with enhanced methodology
+
+**Example:** `brainstorming` skill guides the AI through:
+1. UNDERSTAND: Ask clarifying questions
+2. REQUIREMENTS: List functional/non-functional requirements
+3. CONSTRAINTS: Identify dependencies
+4. DESIGN: Propose 2-3 approaches
+5. DECISION: Recommend with rationale
+6. SPEC: Output specification
+
+### Configuration
+
+```bash
+# Enable skills system (default: enabled)
+ENABLE_SKILLS=1
+```
+
+### Skill-Routing Synergy
+
+Some skills can force a specific tier:
+- `quick-fix` → local (simple edits don't need Claude)
+- `architecture-review` → opus (needs deep reasoning)
+- `security-audit` → opus (thorough analysis required)
+
+Others let smart routing decide based on the actual query.
+
+---
+
 ## Token Reduction
 
 The gateway reduces token usage through multiple layers:
@@ -318,7 +444,13 @@ RATE_LIMIT_RPM=60
 DATABASE_URL=                   # PostgreSQL (enables usage tracking, multi-project)
 ENABLE_MULTI_PROJECT=0
 ENABLE_SMART_ROUTING=1
+SMART_ROUTING_MODE=local_first  # "local_first" | "keyword"
 PROMETHEUS_ENABLED=1
+ENABLE_CASCADE_ROUTING=0        # Try local first, escalate if needed
+CASCADE_QUALITY_CHECK_MODE=heuristic
+CASCADE_LOG_OUTCOMES=1
+ENABLE_SEMANTIC_ROUTING_SIGNAL=0  # Use embeddings (Phase B)
+ENABLE_SKILLS=1                 # Curated prompt templates
 ```
 
 ---

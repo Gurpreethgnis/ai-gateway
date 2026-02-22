@@ -47,6 +47,18 @@ async def chat(req: Request, body: ChatReq):
 
     ray = req.headers.get("cf-ray") or ""
     t0 = time.time()
+    
+    # Skills system: check for X-Gateway-Skill header
+    skill_header = req.headers.get("x-gateway-skill")
+    if skill_header:
+        from gateway.config import ENABLE_SKILLS
+        if ENABLE_SKILLS:
+            from gateway.skills import apply_skill_to_system_prompt
+            original_system = body.system or ""
+            enhanced_system = apply_skill_to_system_prompt(original_system, skill_header)
+            if enhanced_system != original_system:
+                log.info("CHAT skill applied: %s", skill_header)
+                body.system = enhanced_system
 
     # Explicit provider request
     if body.provider == "local":
@@ -55,26 +67,47 @@ async def chat(req: Request, body: ChatReq):
     # Smart routing when no explicit provider
     if not body.provider and body.model in (None, "auto", "smartroute"):
         try:
-            from gateway.smart_routing import route_request
-            from gateway.config import ENABLE_SMART_ROUTING
+            from gateway.config import ENABLE_SMART_ROUTING, ENABLE_CASCADE_ROUTING
             
             if ENABLE_SMART_ROUTING:
                 messages = [{"role": m.role, "content": m.content} for m in body.messages]
-                decision = await route_request(
-                    messages=messages,
-                    tools=[],  # Simple chat endpoint doesn't support tools
-                    project_id=None,
-                    explicit_model=body.model,
-                    system_prompt=body.system or ""
-                )
                 
-                if decision.provider == "local":
-                    log.info("CHAT smart routing -> LOCAL (tier=%s, phase=%s)", decision.tier, decision.phase)
-                    return await _handle_local_provider(body, ray)
-                
-                # Use Claude with selected model
-                model = decision.model
-                log.info("CHAT smart routing -> %s (tier=%s, phase=%s)", model, decision.tier, decision.phase)
+                if ENABLE_CASCADE_ROUTING:
+                    # Use cascade routing
+                    from gateway.cascade_router import route_with_cascade
+                    decision, local_response, cascade_metadata = await route_with_cascade(
+                        messages=messages,
+                        tools=[],  # Simple chat endpoint doesn't support tools
+                        project_id=None,
+                        system_prompt=body.system or "",
+                        explicit_model=body.model,
+                    )
+                    
+                    if local_response:
+                        # Return local response immediately
+                        log.info("CHAT cascade: returning local response")
+                        return local_response
+                    
+                    model = decision.model
+                    log.info("CHAT cascade -> %s (tier=%s, escalated=%s)", 
+                            model, decision.tier, cascade_metadata.get("escalated"))
+                else:
+                    # Standard smart routing
+                    from gateway.smart_routing import route_request
+                    decision = await route_request(
+                        messages=messages,
+                        tools=[],
+                        project_id=None,
+                        explicit_model=body.model,
+                        system_prompt=body.system or ""
+                    )
+                    
+                    if decision.provider == "local":
+                        log.info("CHAT smart routing -> LOCAL (tier=%s, phase=%s)", decision.tier, decision.phase)
+                        return await _handle_local_provider(body, ray)
+                    
+                    model = decision.model
+                    log.info("CHAT smart routing -> %s (tier=%s, phase=%s)", model, decision.tier, decision.phase)
             else:
                 joined_user = "\n".join(m.content for m in body.messages if m.role == "user")
                 model = route_model_from_messages(joined_user, body.model)

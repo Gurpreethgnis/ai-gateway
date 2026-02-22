@@ -85,6 +85,19 @@ ROUTING_CLASSIFIER_TIMEOUT = float(os.getenv("ROUTING_CLASSIFIER_TIMEOUT", "5"))
 ROUTING_CLASSIFIER_CACHE_SIZE = int(os.getenv("ROUTING_CLASSIFIER_CACHE_SIZE", "256"))  # LRU cache size
 LOCAL_CONTEXT_CHAR_LIMIT = int(os.getenv("LOCAL_CONTEXT_CHAR_LIMIT", "30000"))  # max chars routable to local
 
+# Cascade Routing (try local first, escalate if quality check fails)
+ENABLE_CASCADE_ROUTING = os.getenv("ENABLE_CASCADE_ROUTING", "0") == "1"
+CASCADE_QUALITY_CHECK_MODE = os.getenv("CASCADE_QUALITY_CHECK_MODE", "heuristic")  # "heuristic" | "llm" | "none"
+CASCADE_MIN_RESPONSE_LENGTH = int(os.getenv("CASCADE_MIN_RESPONSE_LENGTH", "100"))
+CASCADE_LOG_OUTCOMES = os.getenv("CASCADE_LOG_OUTCOMES", "1") == "1"
+
+# Semantic Routing Signal (embedding-based routing)
+ENABLE_SEMANTIC_ROUTING_SIGNAL = os.getenv("ENABLE_SEMANTIC_ROUTING_SIGNAL", "0") == "1"
+SEMANTIC_EMBEDDING_CACHE_TTL = int(os.getenv("SEMANTIC_EMBEDDING_CACHE_TTL", "3600"))
+
+# Skills System (curated prompt templates)
+ENABLE_SKILLS = os.getenv("ENABLE_SKILLS", "1") == "1"
+
 # Batch Processing
 ENABLE_BATCH_API = os.getenv("ENABLE_BATCH_API", "1") == "1"
 

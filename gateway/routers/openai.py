@@ -175,6 +175,85 @@ async def get_project_context(request: Request) -> tuple[Optional[int], Optional
     return None, None, 60
 
 
+async def _log_routing_outcome(
+    project_id: Optional[int],
+    messages: List[Dict[str, Any]],
+    tools: List[Dict[str, Any]],
+    cascade_metadata: Dict[str, Any],
+    latency_ms: int,
+    success: bool,
+) -> None:
+    """
+    Log routing outcome to database for training future learned routers.
+    
+    Args:
+        project_id: Optional project ID
+        messages: Conversation messages
+        tools: Tool definitions
+        cascade_metadata: Metadata from cascade router
+        latency_ms: Total request latency
+        success: Whether request succeeded
+    """
+    if not DATABASE_URL:
+        return
+    
+    try:
+        from gateway.cascade_router import compute_query_hash
+        from gateway.db import get_session, RoutingOutcome
+        
+        query_hash = compute_query_hash(messages)
+        last_msg_text = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    last_msg_text = content
+                elif isinstance(content, list):
+                    parts = []
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            parts.append(block.get("text", ""))
+                    last_msg_text = " ".join(parts)
+                break
+        
+        # Check for tool_result blocks
+        has_tool_results = False
+        for msg in messages:
+            content = msg.get("content", [])
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        has_tool_results = True
+                        break
+        
+        outcome = RoutingOutcome(
+            project_id=project_id,
+            query_hash=query_hash,
+            query_embedding=None,  # TODO: compute embedding if ENABLE_SEMANTIC_ROUTING_SIGNAL
+            query_length=len(last_msg_text),
+            has_tools=len(tools) > 0,
+            has_tool_results=has_tool_results,
+            message_count=len(messages),
+            initial_tier=cascade_metadata.get("initial_tier", "unknown"),
+            final_tier=cascade_metadata.get("final_tier", cascade_metadata.get("initial_tier", "unknown")),
+            escalated=cascade_metadata.get("escalated", False),
+            escalation_reason=cascade_metadata.get("escalation_reason"),
+            response_quality_score=cascade_metadata.get("quality_score"),
+            latency_ms=latency_ms,
+            success=success,
+        )
+        
+        async with get_session() as session:
+            session.add(outcome)
+            await session.commit()
+        
+        log.debug("Logged routing outcome: tier=%s->%s, escalated=%s", 
+                 outcome.initial_tier, outcome.final_tier, outcome.escalated)
+    
+    except Exception as e:
+        log.warning("Failed to log routing outcome: %r", e)
+
+
 def normalize_request_body(parsed: Dict[str, Any]) -> Dict[str, Any]:
     """Convert various OpenAI API formats to Chat Completions format."""
     if "messages" in parsed:
@@ -509,6 +588,21 @@ async def openai_chat_completions(req: Request):
     system_text = enforce_diff_first(system_text)
     system_text, meta = strip_or_truncate("system", system_text, LIMITS["system_max"], allow_strip=False)
     track_reduction(meta)
+    
+    # Skills system: check for X-Gateway-Skill header and prepend skill prompt
+    skill_header = req.headers.get("x-gateway-skill")
+    skill_forced_tier = None
+    if skill_header:
+        from gateway.config import ENABLE_SKILLS
+        if ENABLE_SKILLS:
+            from gateway.skills import apply_skill_to_system_prompt, get_skill_forced_tier
+            original_system_text = system_text
+            system_text = apply_skill_to_system_prompt(system_text, skill_header)
+            if system_text != original_system_text:
+                log.info("Skill applied: %s", skill_header)
+                skill_forced_tier = get_skill_forced_tier(skill_header)
+                if skill_forced_tier:
+                    log.info("Skill forces tier: %s", skill_forced_tier)
 
     if ENABLE_MEMORY_LAYER and project_id:
         try:
@@ -535,20 +629,86 @@ async def openai_chat_completions(req: Request):
     if is_auto_model:
         use_smart_routing = True
         request_model = None  # let gateway pick from content
+    
+    # Cascade routing (try local first, escalate if quality check fails)
+    cascade_metadata = None
+    local_response = None
 
     if use_smart_routing:
         try:
-            from gateway.smart_routing import route_request
-            decision = await route_request(aa_messages, aa_tools, project_id, request_model, system_text)
+            from gateway.config import ENABLE_CASCADE_ROUTING
+            from gateway.cascade_router import route_with_cascade, should_log_routing_outcome
             
-            # If routed to local provider, handle via local provider
-            if decision.provider == "local":
-                log.info("OA smart routing -> LOCAL (tier=%s, phase=%s)", decision.tier, decision.phase)
-                return await handle_local_provider(parsed, ray, t0)
-            
-            # Otherwise use Claude with the selected model
-            model = decision.model
-            log.info("OA smart routing -> %s (tier=%s, phase=%s)", model, decision.tier, decision.phase)
+            if ENABLE_CASCADE_ROUTING:
+                # Use cascade routing
+                decision, local_response, cascade_metadata = await route_with_cascade(
+                    aa_messages, aa_tools, project_id, system_text, request_model
+                )
+                
+                # If cascade returned a valid local response, return it immediately
+                if local_response:
+                    local_content = local_response.get("content", "")
+                    log.info("Cascade: returning local response (length=%d)", len(local_content))
+                    
+                    # Return local response in OpenAI format
+                    from gateway.context_pruner import estimate_messages_tokens
+                    
+                    local_finish = "stop"
+                    local_usage = {
+                        "prompt_tokens": estimate_messages_tokens(aa_messages),
+                        "completion_tokens": len(local_content) // 4,  # rough estimate
+                        "total_tokens": estimate_messages_tokens(aa_messages) + len(local_content) // 4,
+                    }
+                    
+                    latency_ms = int((time.time() - t0) * 1000)
+                    log.info(
+                        "REQ POST /v1/chat/completions -> 200 (%dms) cf-ray=%s ua=%s",
+                        latency_ms, ray, user_agent
+                    )
+                    
+                    # Log routing outcome
+                    if should_log_routing_outcome():
+                        await _log_routing_outcome(
+                            project_id, aa_messages, aa_tools,
+                            cascade_metadata, latency_ms, success=True
+                        )
+                    
+                    return {
+                        "id": f"chatcmpl-local-{ray}",
+                        "object": "chat.completion",
+                        "created": int(time.time()),
+                        "model": LOCAL_LLM_DEFAULT_MODEL,
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": local_content,
+                            },
+                            "finish_reason": local_finish,
+                        }],
+                        "usage": local_usage,
+                    }
+                
+                # No local response, use decision for Claude routing
+                if decision.provider == "local":
+                    # This shouldn't happen (cascade should have returned local_response)
+                    log.warning("Cascade returned local tier but no response, routing to Claude")
+                
+                model = decision.model
+                log.info("Cascade routing -> %s (tier=%s, phase=%s)", model, decision.tier, decision.phase)
+            else:
+                # Standard routing (no cascade)
+                from gateway.smart_routing import route_request
+                decision = await route_request(aa_messages, aa_tools, project_id, request_model, system_text)
+                
+                # If routed to local provider, handle via local provider
+                if decision.provider == "local":
+                    log.info("OA smart routing -> LOCAL (tier=%s, phase=%s)", decision.tier, decision.phase)
+                    return await handle_local_provider(parsed, ray, t0)
+                
+                # Otherwise use Claude with the selected model
+                model = decision.model
+                log.info("OA smart routing -> %s (tier=%s, phase=%s)", model, decision.tier, decision.phase)
         except Exception as e:
             log.warning("Smart routing failed: %r", e)
             model = route_model_from_messages(joined_user, request_model)
@@ -1071,6 +1231,15 @@ async def openai_chat_completions(req: Request):
     if cache_write_tokens > 0:
         from gateway.metrics import record_prompt_cache_tokens
         record_prompt_cache_tokens("write", model, project_name or "default", cache_write_tokens)
+    
+    # Log routing outcome if cascade was used
+    if cascade_metadata and cascade_metadata.get("cascade_enabled"):
+        from gateway.cascade_router import should_log_routing_outcome
+        if should_log_routing_outcome():
+            asyncio.create_task(_log_routing_outcome(
+                project_id, aa_messages, aa_tools,
+                cascade_metadata, dt_ms, success=True
+            ))
 
     if ENABLE_MEMORY_LAYER and project_id and out_text and len(out_text) > 200:
         try:

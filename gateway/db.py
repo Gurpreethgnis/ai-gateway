@@ -143,6 +143,38 @@ class ModelSuccessRate(Base):
     )
 
 
+class RoutingOutcome(Base):
+    __tablename__ = "routing_outcomes"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"), nullable=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    
+    # Request fingerprint
+    query_hash: Mapped[str] = mapped_column(String(64), index=True)
+    query_embedding: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    query_length: Mapped[int] = mapped_column(Integer, default=0)
+    has_tools: Mapped[bool] = mapped_column(default=False)
+    has_tool_results: Mapped[bool] = mapped_column(default=False)
+    message_count: Mapped[int] = mapped_column(Integer, default=0)
+    
+    # Routing decision
+    initial_tier: Mapped[str] = mapped_column(String(16), nullable=False)
+    final_tier: Mapped[str] = mapped_column(String(16), nullable=False)
+    escalated: Mapped[bool] = mapped_column(default=False)
+    escalation_reason: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    
+    # Outcome signals
+    response_quality_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    success: Mapped[bool] = mapped_column(default=True)
+    
+    __table_args__ = (
+        Index("ix_routing_project_timestamp", "project_id", "timestamp"),
+        Index("ix_routing_query_hash", "query_hash"),
+    )
+
+
 engine = None
 async_session_factory = None
 
