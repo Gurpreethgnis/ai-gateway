@@ -275,9 +275,9 @@ def _get_stats_from_redis(full: bool) -> dict:
 async def _get_recent_requests(limit: int = 20) -> list[dict]:
     """Fetch recent requests from DB with strict timeout. Returns empty list on any issue."""
     import asyncio
-    from gateway.db import async_session_factory
+    from gateway.db import async_session_factory, db_ready
     
-    if not async_session_factory:
+    if not async_session_factory or not db_ready:
         return []
     
     async def _query():

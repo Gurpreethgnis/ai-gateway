@@ -37,23 +37,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("Could not clear Redis concurrency slots: %r", e)
 
+    # Initialize database in background (non-blocking)
     if DATABASE_URL:
         import asyncio
-        from gateway.db import init_db, create_tables
-        init_db()
-        for attempt in range(3):
-            try:
-                # Pool timeout is 60s by default; allow create_tables() time to connect + run
-                await asyncio.wait_for(create_tables(), timeout=70)
-                log.info("Database initialized successfully")
-                break
-            except (asyncio.TimeoutError, Exception) as e:
-                if attempt < 2:
-                    wait = (attempt + 1) * 3
-                    log.warning("Database init attempt %d failed: %r, retrying in %ds", attempt + 1, e, wait)
-                    await asyncio.sleep(wait)
-                else:
-                    log.warning("Database initialization failed after 3 attempts: %r (gateway will run without DB)", e)
+        from gateway.db import init_db, background_db_init
+        init_db()  # Creates engine config (instant, no connection)
+        app.state.db_init_task = asyncio.create_task(background_db_init())
+        log.info("Database initialization started in background")
     
     yield
 

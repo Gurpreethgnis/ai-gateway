@@ -177,6 +177,7 @@ class RoutingOutcome(Base):
 
 engine = None
 async_session_factory = None
+db_ready = False
 
 
 def init_db():
@@ -250,10 +251,36 @@ async def create_tables():
             pass  # column may not exist or already nullable
 
 
+async def background_db_init():
+    """Initialize database in background with retry logic. Non-blocking for app startup."""
+    global db_ready
+    import asyncio
+    import logging
+    
+    log = logging.getLogger("gateway")
+    
+    for attempt in range(3):
+        try:
+            # Pool timeout is 60s by default; allow create_tables() time to connect + run
+            await asyncio.wait_for(create_tables(), timeout=70)
+            db_ready = True
+            log.info("Database initialized successfully")
+            return
+        except (asyncio.TimeoutError, Exception) as e:
+            if attempt < 2:
+                wait = (attempt + 1) * 3
+                log.warning("Database init attempt %d failed: %r, retrying in %ds", attempt + 1, e, wait)
+                await asyncio.sleep(wait)
+            else:
+                log.warning("Database initialization failed after 3 attempts: %r (gateway will run without DB)", e)
+
+
 @asynccontextmanager
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     if async_session_factory is None:
         raise RuntimeError("Database not initialized. Set DATABASE_URL.")
+    if not db_ready:
+        raise RuntimeError("Database still connecting. Please wait or try again.")
     async with async_session_factory() as session:
         try:
             yield session
@@ -309,7 +336,7 @@ async def record_usage_to_db(
     cache_creation_input_tokens: int = 0,
     gateway_tokens_saved: int = 0,
 ):
-    if not DATABASE_URL:
+    if not DATABASE_URL or not db_ready:
         return
     
     import asyncio
