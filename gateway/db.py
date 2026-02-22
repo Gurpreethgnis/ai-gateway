@@ -1,4 +1,5 @@
 import os
+import logging
 import hashlib
 from datetime import datetime
 from typing import Optional, List, AsyncGenerator
@@ -9,6 +10,10 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
 from gateway.config import DATABASE_URL
+
+log = logging.getLogger("gateway")
+
+DATABASE_PUBLIC_URL = os.getenv("DATABASE_PUBLIC_URL")
 
 class Base(DeclarativeBase):
     pass
@@ -180,36 +185,55 @@ async_session_factory = None
 db_ready = False
 
 
-def init_db():
+def _to_asyncpg_url(raw_url: str) -> str:
+    if raw_url.startswith("postgres://"):
+        return raw_url.replace("postgres://", "postgresql+asyncpg://", 1)
+    if raw_url.startswith("postgresql://"):
+        return raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return raw_url
+
+
+def init_db(url_override: str | None = None):
     global engine, async_session_factory
-    if not DATABASE_URL:
+    raw_url = url_override or DATABASE_URL
+    if not raw_url:
         return
     
-    db_url = DATABASE_URL
-    if db_url.startswith("postgres://"):
-        db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
-    elif db_url.startswith("postgresql://"):
-        db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    db_url = _to_asyncpg_url(raw_url)
+    safe = raw_url.split("@")[-1] if "@" in raw_url else "(set)"
+    log.info("init_db target: %s", safe)
     
-    # Railway Postgres can cold-start slowly; allow up to 60s to get a connection
-    pool_timeout = int(os.getenv("DB_POOL_TIMEOUT", "60"))
+    pool_timeout = int(os.getenv("DB_POOL_TIMEOUT", "30"))
+    connect_timeout = int(os.getenv("DB_CONNECT_TIMEOUT", "10"))
     
     engine = create_async_engine(
         db_url,
         echo=False,
         pool_pre_ping=True,
-        pool_size=10,
-        max_overflow=5,
+        pool_size=5,
+        max_overflow=3,
         pool_timeout=pool_timeout,
         pool_recycle=300,
         connect_args={
-            "command_timeout": 30,  # Fail individual commands after 30s
+            "timeout": connect_timeout,
+            "command_timeout": 10,
             "server_settings": {
-                "statement_timeout": "5000"
+                "statement_timeout": "10000"
             }
         }
     )
     async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+async def _safe_migrate(conn, sql: str, description: str):
+    """Run a single migration statement using SAVEPOINT so failures don't abort the transaction."""
+    try:
+        await conn.execute(text("SAVEPOINT sp_migrate"))
+        await conn.execute(text(sql))
+        await conn.execute(text("RELEASE SAVEPOINT sp_migrate"))
+        log.debug("Migration OK: %s", description)
+    except Exception:
+        await conn.execute(text("ROLLBACK TO SAVEPOINT sp_migrate"))
 
 
 async def create_tables():
@@ -217,70 +241,83 @@ async def create_tables():
         return
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # Allow usage records without a project (e.g. single-tenant gateway) so dashboard still shows usage
-        try:
-            await conn.execute(text("ALTER TABLE usage_records ALTER COLUMN project_id DROP NOT NULL"))
-        except Exception:
-            pass  # column may already be nullable or table just created with new schema
         
-        # Add missing columns if they don't exist
-        try:
-            await conn.execute(text("ALTER TABLE usage_records ADD COLUMN cache_read_input_tokens INTEGER"))
-        except Exception:
-            pass  # column may already exist
-        try:
-            await conn.execute(text("ALTER TABLE usage_records ADD COLUMN cache_creation_input_tokens INTEGER"))
-        except Exception:
-            pass  # column may already exist
-        try:
-            await conn.execute(text("ALTER TABLE usage_records ADD COLUMN gateway_tokens_saved INTEGER"))
-        except Exception:
-            pass  # column may already exist
-            
-        # Make cache-related columns nullable if they exist
-        try:
-            await conn.execute(text("ALTER TABLE usage_records ALTER COLUMN cache_read_input_tokens DROP NOT NULL"))
-        except Exception:
-            pass  # column may not exist or already nullable
-        try:
-            await conn.execute(text("ALTER TABLE usage_records ALTER COLUMN cache_creation_input_tokens DROP NOT NULL"))
-        except Exception:
-            pass  # column may not exist or already nullable
-        try:
-            await conn.execute(text("ALTER TABLE usage_records ALTER COLUMN gateway_tokens_saved DROP NOT NULL"))
-        except Exception:
-            pass  # column may not exist or already nullable
+        migrations = [
+            ("ALTER TABLE usage_records ALTER COLUMN project_id DROP NOT NULL",
+             "make project_id nullable"),
+            ("ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS cache_read_input_tokens INTEGER",
+             "add cache_read_input_tokens"),
+            ("ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS cache_creation_input_tokens INTEGER",
+             "add cache_creation_input_tokens"),
+            ("ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS gateway_tokens_saved INTEGER",
+             "add gateway_tokens_saved"),
+            ("ALTER TABLE usage_records ALTER COLUMN cache_read_input_tokens DROP NOT NULL",
+             "nullable cache_read_input_tokens"),
+            ("ALTER TABLE usage_records ALTER COLUMN cache_creation_input_tokens DROP NOT NULL",
+             "nullable cache_creation_input_tokens"),
+            ("ALTER TABLE usage_records ALTER COLUMN gateway_tokens_saved DROP NOT NULL",
+             "nullable gateway_tokens_saved"),
+        ]
+        for sql, desc in migrations:
+            await _safe_migrate(conn, sql, desc)
 
 
 async def background_db_init():
     """
-    Initialize database in background with unlimited retry logic. 
-    Non-blocking for app startup. Retries indefinitely since the gateway runs fine without DB.
+    Initialize database in background with retry logic.
+    Tries the internal (private) URL first.  If it fails repeatedly, switches
+    to DATABASE_PUBLIC_URL (Railway's TCP proxy) as a fallback.
     """
-    global db_ready
+    global db_ready, engine, async_session_factory
     import asyncio
-    import logging
-    
-    log = logging.getLogger("gateway")
+    import traceback
     
     attempt = 0
-    wait = 3  # Start with 3s backoff
+    wait = 3
+    internal_failures = 0
+    MAX_INTERNAL_FAILURES = 3
+    using_public = False
     
     while True:
         attempt += 1
         try:
-            # Pool timeout is 60s by default; allow create_tables() time to connect + run
-            await asyncio.wait_for(create_tables(), timeout=70)
+            await asyncio.wait_for(create_tables(), timeout=30)
             db_ready = True
-            log.info("Database initialized successfully after %d attempt(s)", attempt)
+            url_type = "public" if using_public else "internal"
+            log.info("Database initialized on attempt %d (%s URL)", attempt, url_type)
             return
-        except (asyncio.TimeoutError, Exception) as e:
+        except Exception as e:
+            err_type = type(e).__name__
+            err_msg = str(e)[:200] if str(e) else ""
+            tb_lines = traceback.format_exc().strip().split("\n")
+            short_tb = tb_lines[-1] if tb_lines else ""
+            
             log.warning(
-                "Database init attempt %d failed: %r, retrying in %ds", 
-                attempt, e, wait
+                "DB init attempt %d failed: %s: %s [%s] retrying in %ds",
+                attempt, err_type, err_msg, short_tb, wait
             )
+            
+            if not using_public:
+                internal_failures += 1
+            
+            if (internal_failures >= MAX_INTERNAL_FAILURES
+                    and not using_public
+                    and DATABASE_PUBLIC_URL):
+                log.warning(
+                    "Internal URL failed %d times; switching to public URL",
+                    internal_failures
+                )
+                using_public = True
+                if engine:
+                    try:
+                        await engine.dispose()
+                    except Exception:
+                        pass
+                init_db(url_override=DATABASE_PUBLIC_URL)
+                wait = 2
+                continue
+            
             await asyncio.sleep(wait)
-            # Exponential backoff: 3s, 6s, 12s, 24s, 48s, then cap at 60s
             wait = min(wait * 2, 60)
 
 
@@ -345,12 +382,10 @@ async def record_usage_to_db(
     cache_creation_input_tokens: int = 0,
     gateway_tokens_saved: int = 0,
 ):
-    if not DATABASE_URL or not db_ready:
+    if not db_ready:
         return
     
     import asyncio
-    import logging
-    log = logging.getLogger("gateway")
 
     async def _do_record():
         cost = calculate_cost(model, input_tokens, output_tokens)
