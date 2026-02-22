@@ -11,6 +11,34 @@ from gateway.logging_setup import log
 
 router = APIRouter()
 
+
+async def _handle_local_provider(body: ChatReq, ray: str) -> dict:
+    """Handle chat request via local Ollama provider."""
+    from gateway.providers.ollama import call_ollama
+    
+    t0 = time.time()
+    
+    messages = [{"role": m.role, "content": m.content} for m in body.messages]
+    
+    if body.system:
+        messages.insert(0, {"role": "system", "content": body.system})
+    
+    result = await call_ollama(
+        messages=messages,
+        model=body.model,
+        temperature=body.temperature,
+        max_tokens=body.max_tokens,
+    )
+    
+    dt_ms = int((time.time() - t0) * 1000)
+    log.info(
+        "CHAT OK (cf-ray=%s) provider=local model=%s ms=%d",
+        ray, result.get("model"), dt_ms
+    )
+    
+    return result
+
+
 @router.post("/chat")
 async def chat(req: Request, body: ChatReq):
     raw = await req.body()
@@ -19,6 +47,9 @@ async def chat(req: Request, body: ChatReq):
 
     ray = req.headers.get("cf-ray") or ""
     t0 = time.time()
+
+    if body.provider == "local":
+        return await _handle_local_provider(body, ray)
 
     joined_user = "\n".join(m.content for m in body.messages if m.role == "user")
     model = route_model_from_messages(joined_user, body.model)
@@ -63,5 +94,5 @@ async def chat(req: Request, body: ChatReq):
         cache_set(key, data, CACHE_TTL_SECONDS)
 
     dt_ms = int((time.time() - t0) * 1000)
-    log.info("CHAT OK (cf-ray=%s) model=%s ms=%s cached=%s", ray, model, dt_ms, False)
+    log.info("CHAT OK (cf-ray=%s) provider=anthropic model=%s ms=%s cached=%s", ray, model, dt_ms, False)
     return data

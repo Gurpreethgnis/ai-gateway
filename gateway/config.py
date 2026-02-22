@@ -86,3 +86,28 @@ ENABLE_PLUGIN_TOOLS = os.getenv("ENABLE_PLUGIN_TOOLS", "1") == "1"
 
 # Multi-project
 ENABLE_MULTI_PROJECT = os.getenv("ENABLE_MULTI_PROJECT", "0") == "1"
+
+# =============================================================================
+# Local LLM Provider (Ollama via Cloudflare Access)
+# =============================================================================
+LOCAL_LLM_BASE_URL = os.getenv("LOCAL_LLM_BASE_URL")  # e.g., https://ollama.example.com
+LOCAL_LLM_DEFAULT_MODEL = os.getenv("LOCAL_LLM_DEFAULT_MODEL", "qwen2.5-coder:14b-instruct")
+LOCAL_LLM_TIMEOUT_SECONDS = float(os.getenv("LOCAL_LLM_TIMEOUT_SECONDS", "120"))
+
+# Cloudflare Access service token headers for local LLM
+LOCAL_CF_ACCESS_CLIENT_ID = os.getenv("LOCAL_CF_ACCESS_CLIENT_ID")
+LOCAL_CF_ACCESS_CLIENT_SECRET = os.getenv("LOCAL_CF_ACCESS_CLIENT_SECRET")
+
+# Allowlist of local models that can be used (security)
+LOCAL_LLM_MODEL_ALLOWLIST = [
+    "qwen2.5-coder:14b-instruct",
+    "qwen2.5-coder:7b-instruct",
+    "qwen2.5-coder:32b-instruct",
+    "qwen2.5:14b",
+    "qwen2.5:7b",
+    "llama3.2:latest",
+    "llama3.1:8b",
+    "codellama:13b",
+    "deepseek-coder:6.7b",
+    "deepseek-coder-v2:16b",
+]

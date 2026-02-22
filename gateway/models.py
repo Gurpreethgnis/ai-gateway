@@ -3,6 +3,8 @@ from pydantic import BaseModel, Field
 
 from gateway.config import DEFAULT_MAX_TOKENS
 
+ProviderType = Literal["anthropic", "local"]
+
 class ChatMessage(BaseModel):
     role: str = Field(..., pattern="^(user|assistant)$")
     content: str
@@ -13,6 +15,7 @@ class ChatReq(BaseModel):
     max_tokens: int = DEFAULT_MAX_TOKENS
     model: Optional[str] = None
     temperature: Optional[float] = 0.2
+    provider: Optional[ProviderType] = None  # "local" for Ollama, default/None for Anthropic
 
 OpenAIRole = Literal["system", "user", "assistant", "tool", "developer"]
 OAContent = Union[str, List[Any], Dict[str, Any], None]

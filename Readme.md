@@ -1,6 +1,6 @@
-# Claude Gateway
+# AI Gateway
 
-**OpenAI-compatible API proxy for Anthropic Claude with built-in caching, token reduction, and cost optimization.**
+**Multi-provider AI gateway with OpenAI-compatible API, intelligent routing, caching, and cost optimization.**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green)](https://fastapi.tiangolo.com/)
@@ -8,30 +8,69 @@
 
 ---
 
-## The Problem
+## Overview
 
-When you use AI-powered IDEs like **Cursor** or **Continue** with Claude:
+A unified API gateway that routes requests to multiple AI providers through a single OpenAI-compatible interface. Use Claude, local Ollama models, or let the gateway intelligently choose—all from Cursor, Continue, or any OpenAI SDK client.
 
-- **Massive repeated context** – The same system instructions, rules, and file contents are sent on every request. A single coding session can burn hundreds of thousands of tokens on duplicate data.
-- **No caching** – There is no layer between your client and the API. Identical prompts are billed again and again.
-- **No control over routing** – You can’t automatically use Sonnet for simple tasks and Opus for hard ones, so you either overpay or under-spec.
-- **Opaque costs** – Usage and spend are hard to track, especially across teams or projects.
-- **Vendor lock-in to the IDE** – Your API key and model choice live inside the tool; you can’t centralize auth, rate limits, or policy.
+### Supported Providers
 
-The result: **high token bills** and **no way to optimize** without giving up your favorite editor.
+| Provider | Models | Features |
+|----------|--------|----------|
+| **Anthropic Claude** | Sonnet, Opus, Haiku | Streaming, tool calls, prompt caching |
+| **Local Ollama** | Qwen, Llama, DeepSeek, CodeLlama | Self-hosted, private, no API costs |
 
-This gateway sits between your clients and Anthropic. It adds caching, token reduction, smart routing, and observability so you keep using Cursor or any OpenAI-compatible client—while cutting cost and gaining control.
+---
+
+## Why Use This?
+
+### The Problem
+
+AI-powered IDEs like **Cursor** and **Continue** have limitations:
+
+- **Massive repeated context** – Same instructions sent every request, burning tokens on duplicates
+- **No caching** – Identical prompts billed repeatedly
+- **Single provider** – Can't mix Claude for complex tasks with local models for simple ones
+- **No routing control** – Can't auto-select Sonnet vs Opus based on task complexity
+- **Opaque costs** – Hard to track usage across teams/projects
+- **Vendor lock-in** – API keys and model choices locked in the IDE
+
+### The Solution
+
+This gateway sits between your clients and AI providers:
+
+- **Multi-provider routing** – Use Claude, local models, or auto-select per request
+- **70-80% token reduction** – Caching, deduplication, and prompt optimization
+- **Smart routing** – Automatically use Opus for hard tasks, Sonnet for simple ones
+- **Unified API** – One OpenAI-compatible endpoint for all providers
+- **Full observability** – Prometheus metrics, usage tracking, cost monitoring
+- **Production reliability** – Circuit breakers, retries, rate limiting
 
 ---
 
 ## Features
 
-- **OpenAI-Compatible API** - Drop-in replacement for OpenAI endpoints, works with Cursor, Continue, and any OpenAI SDK
-- **70-80% Token Reduction** - Multi-layer caching including Anthropic prompt caching, response caching, and file deduplication
-- **Smart Model Routing** - Automatically routes complex tasks to Opus, simple tasks to Sonnet
-- **Full Tool Support** - Translates OpenAI tool calls to Anthropic format with streaming support
-- **Production Ready** - Circuit breakers, retries, rate limiting, and Prometheus metrics
-- **Multi-Project Support** - Isolated configurations, rate limits, and usage tracking per project
+### Core Capabilities
+
+- **OpenAI-Compatible API** – Drop-in replacement for any OpenAI SDK client
+- **Multi-Provider Support** – Route to Claude, Ollama, or auto-select
+- **Smart Model Routing** – Complexity-based routing between Sonnet/Opus
+- **Full Tool Support** – OpenAI ↔ Anthropic tool call translation with streaming
+
+### Cost Optimization
+
+- **Response Caching** – 100% savings on repeated requests (Redis)
+- **Anthropic Prompt Cache** – 80-90% savings on system prompts
+- **File Deduplication** – 30-50% savings on unchanged file content
+- **IDE Boilerplate Strip** – 20-30% savings removing repeated instructions
+- **Diff-First Policy** – 50-70% savings returning diffs instead of full files
+
+### Production Ready
+
+- **Circuit Breakers** – Automatic failover on provider errors
+- **Exponential Backoff** – Smart retry logic with rate limit handling
+- **Rate Limiting** – Per-project request limits
+- **Prometheus Metrics** – Full observability stack
+- **Multi-Project Support** – Isolated configs, limits, and tracking per project
 
 ---
 
@@ -43,10 +82,22 @@ This gateway sits between your clients and Anthropic. It adds caching, token red
 
 ### 2. Set Environment Variables
 
+**Minimum (Claude only):**
 ```bash
-ANTHROPIC_API_KEY=sk-ant-...    # Required
-GATEWAY_API_KEY=your-secret     # Required - clients use this to authenticate
-REDIS_URL=                      # Optional - enables caching (Railway provides this)
+ANTHROPIC_API_KEY=sk-ant-...    # Anthropic API key
+GATEWAY_API_KEY=your-secret     # Client authentication
+```
+
+**With caching (recommended):**
+```bash
+REDIS_URL=redis://...           # Enables response caching
+```
+
+**With local models:**
+```bash
+LOCAL_LLM_BASE_URL=https://ollama.yourdomain.com
+LOCAL_CF_ACCESS_CLIENT_ID=<service-token-id>
+LOCAL_CF_ACCESS_CLIENT_SECRET=<service-token-secret>
 ```
 
 ### 3. Configure Your Client
@@ -66,21 +117,133 @@ client = OpenAI(
     api_key="your-gateway-api-key",
 )
 
+# Use Claude
 response = client.chat.completions.create(
     model="claude-sonnet-4-0",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+
+# Use local Ollama model
+response = client.chat.completions.create(
+    model="local:qwen2.5-coder:14b-instruct",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+
+# Use smart routing (auto-select Sonnet/Opus)
+response = client.chat.completions.create(
+    model="auto",
     messages=[{"role": "user", "content": "Hello!"}],
 )
 ```
 
 ---
 
-## Models
+## Provider Configuration
 
-**Use a specific model:** In Cursor or Continue, set the model to `sonnet`, `opus`, or the full ID (e.g. `claude-sonnet-4-6`). No prefix needed.
+### Anthropic Claude (Default)
 
-**Use automatic routing (no redeploy):** In the IDE, set the model to **`auto`**. The gateway will choose Sonnet or Opus from the request. You can switch between `auto` and `sonnet`/`opus` per chat.
+Claude is the default provider. Just set `ANTHROPIC_API_KEY` and requests route automatically.
 
-Optional: set `ENABLE_SMART_ROUTING=1` on Railway (default) so `auto` works. To force smart routing on or off for a single request, send header `X-Gateway-Smart-Routing: 1` or `0`, or body `"smart_routing": true` or `false`.
+**Models:**
+- `claude-sonnet-4-0` / `sonnet` – Fast, cost-effective
+- `claude-opus-4-5` / `opus` – Most capable
+- `auto` / `smartroute` – Gateway auto-selects based on complexity
+
+**Smart Routing:**
+
+Set model to `auto` and the gateway analyzes request complexity:
+- Simple queries → Sonnet (cheaper, faster)
+- Complex reasoning, architecture, debugging → Opus (more capable)
+
+Control per-request: `X-Gateway-Smart-Routing: 1|0` header or `"smart_routing": true|false` in body.
+
+### Local Ollama
+
+Run models locally via Cloudflare Access tunnel for privacy and zero API costs.
+
+**Setup:**
+
+1. Deploy Ollama behind Cloudflare Access tunnel
+2. Create a service token with tunnel access
+3. Configure environment variables:
+
+```bash
+LOCAL_LLM_BASE_URL=https://ollama.yourdomain.com
+LOCAL_LLM_DEFAULT_MODEL=qwen2.5-coder:14b-instruct
+LOCAL_CF_ACCESS_CLIENT_ID=<service-token-id>
+LOCAL_CF_ACCESS_CLIENT_SECRET=<service-token-secret>
+LOCAL_LLM_TIMEOUT_SECONDS=120  # Optional, default 120s
+```
+
+**Usage:**
+
+```bash
+# Option 1: Use provider field
+curl -X POST https://your-gateway/v1/chat/completions \
+  -H "Authorization: Bearer $GATEWAY_API_KEY" \
+  -d '{"provider": "local", "messages": [{"role": "user", "content": "Hi"}]}'
+
+# Option 2: Use model prefix
+curl -X POST https://your-gateway/v1/chat/completions \
+  -H "Authorization: Bearer $GATEWAY_API_KEY" \
+  -d '{"model": "local:qwen2.5-coder:14b-instruct", "messages": [...]}'
+```
+
+**Allowed Models:**
+- `qwen2.5-coder:14b-instruct` (default), `qwen2.5-coder:7b-instruct`, `qwen2.5-coder:32b-instruct`
+- `qwen2.5:14b`, `qwen2.5:7b`
+- `llama3.2:latest`, `llama3.1:8b`
+- `codellama:13b`
+- `deepseek-coder:6.7b`, `deepseek-coder-v2:16b`
+
+Unknown models return HTTP 400.
+
+**Limitations:**
+- No streaming (returns complete response)
+- No tool/function calling
+- Latency depends on your hardware
+
+---
+
+## API Reference
+
+### Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/chat/completions` | OpenAI-compatible chat (streaming supported for Claude) |
+| `POST /chat` | Simple chat endpoint |
+| `GET /v1/models` | List available models (Claude + local) |
+| `GET /health` | Health check |
+| `GET /admin/metrics` | Prometheus metrics |
+| `GET /admin/usage` | Usage statistics |
+
+### Request Format
+
+```json
+{
+  "model": "claude-sonnet-4-0",      // or "local:qwen2.5-coder:14b-instruct", "auto"
+  "provider": "local",                // optional: "local" or omit for Claude
+  "messages": [
+    {"role": "system", "content": "You are helpful."},
+    {"role": "user", "content": "Hello!"}
+  ],
+  "max_tokens": 1200,
+  "temperature": 0.2,
+  "stream": true,                     // Claude only
+  "tools": [...]                      // Claude only
+}
+```
+
+### Response Headers
+
+```
+X-Gateway: claude-gateway      # Confirms gateway routing
+X-Provider: ollama             # Provider used (ollama/anthropic)
+X-Model-Source: local|custom   # Model source
+X-Cache: HIT|MISS              # Cache status
+X-RateLimit-Remaining: 59      # Rate limit status
+```
 
 ---
 
@@ -92,11 +255,11 @@ The gateway reduces token usage through multiple layers:
 |-------|---------|-------------|
 | Response Cache | 100% on repeats | Identical requests return cached responses |
 | Anthropic Prompt Cache | 80-90% on system | System prompts cached server-side |
-| File Deduplication | 30-50% | Unchanged files replaced with references |
+| File Deduplication | 30-50% | Unchanged files replaced with hash references |
 | IDE Boilerplate Strip | 20-30% | Removes repeated Cursor/Continue instructions |
 | Diff-First Policy | 50-70% on edits | Model returns diffs instead of full files |
 
-Enable all caching:
+**Enable all optimizations:**
 ```bash
 REDIS_URL=redis://...
 ENABLE_ANTHROPIC_CACHE_CONTROL=1
@@ -107,24 +270,21 @@ ENFORCE_DIFF_FIRST=1
 
 ---
 
-## API Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `POST /v1/chat/completions` | OpenAI-compatible chat |
-| `GET /v1/models` | List available models |
-| `GET /health` | Health check |
-| `GET /admin/metrics` | Prometheus metrics |
-| `GET /admin/usage` | Usage statistics |
-
----
-
 ## Environment Variables
 
 ### Required
 ```bash
-ANTHROPIC_API_KEY=              # Anthropic API key
 GATEWAY_API_KEY=                # Client authentication key
+ANTHROPIC_API_KEY=              # Required for Claude provider
+```
+
+### Local LLM Provider
+```bash
+LOCAL_LLM_BASE_URL=             # Ollama URL (e.g., https://ollama.yourdomain.com)
+LOCAL_LLM_DEFAULT_MODEL=qwen2.5-coder:14b-instruct
+LOCAL_LLM_TIMEOUT_SECONDS=120
+LOCAL_CF_ACCESS_CLIENT_ID=      # Cloudflare Access service token ID
+LOCAL_CF_ACCESS_CLIENT_SECRET=  # Cloudflare Access service token secret
 ```
 
 ### Caching & Token Reduction
@@ -161,35 +321,40 @@ ENABLE_SMART_ROUTING=1
 PROMETHEUS_ENABLED=1
 ```
 
-See [docs/USER_GUIDE.md](docs/USER_GUIDE.md) for complete configuration reference.
-
 ---
 
 ## Architecture
 
 ```
 Client (Cursor/Continue/SDK)
-         │
-         ▼
-┌─────────────────────────────────┐
-│        Claude Gateway           │
-├─────────────────────────────────┤
-│  Auth → Rate Limit → Cache      │
-│         │                       │
-│  Token Reduction Layer          │
-│  • IDE boilerplate stripping    │
-│  • File hash deduplication      │
-│  • Context pruning              │
-│         │                       │
-│  Smart Routing (Sonnet/Opus)    │
-│         │                       │
-│  Reliability Layer              │
-│  • Circuit breaker              │
-│  • Exponential backoff          │
-└─────────────────────────────────┘
-         │
-         ▼
-   Anthropic Claude API
+              │
+              ▼
+┌──────────────────────────────────────┐
+│            AI Gateway                │
+├──────────────────────────────────────┤
+│  Authentication & Rate Limiting      │
+│              │                       │
+│  Token Reduction Layer               │
+│  • IDE boilerplate stripping         │
+│  • File hash deduplication           │
+│  • Context pruning                   │
+│              │                       │
+│  Provider Router                     │
+│  ├─ provider=local    → Ollama       │
+│  ├─ model=local:*     → Ollama       │
+│  ├─ model=auto        → Smart Route  │
+│  └─ default           → Claude       │
+│              │                       │
+│  Reliability Layer                   │
+│  • Circuit breaker                   │
+│  • Exponential backoff               │
+│  • Automatic failover                │
+└──────────────────────────────────────┘
+              │
+       ┌──────┴──────┐
+       ▼             ▼
+  Anthropic      Ollama
+  Claude API     (via CF Tunnel)
 ```
 
 ---
@@ -203,47 +368,58 @@ curl https://your-gateway/admin/metrics -H "X-API-Key: $ADMIN_KEY"
 ```
 
 Key metrics:
-- `gateway_requests_total` - Request count by model/status
-- `gateway_tokens_total` - Token usage
-- `gateway_cache_hits_total` - Cache hit rate
-- `gateway_cost_usd_total` - Cost tracking
+- `gateway_requests_total{provider, model, status}` – Request count
+- `gateway_tokens_total{provider, model, direction}` – Token usage
+- `gateway_cache_hits_total` – Cache hit rate
+- `gateway_cost_usd_total` – Cost tracking (Claude only)
+- `gateway_latency_seconds` – Request latency histogram
 
-### Response Headers
+---
 
-```
-X-Cache: HIT|MISS              # Cache status
-X-RateLimit-Remaining: 59      # Rate limit status
-X-Gateway: claude-gateway      # Confirms gateway routing
-```
+## Error Handling
+
+| Scenario | Status | Description |
+|----------|--------|-------------|
+| Missing API key | 401 | `GATEWAY_API_KEY` not provided |
+| Local provider not configured | 500 | Missing `LOCAL_LLM_*` env vars |
+| Model not in allowlist | 400 | Requested local model not allowed |
+| Provider unreachable | 502 | Claude/Ollama connection failed |
+| Provider timeout | 504 | Request exceeded timeout |
+| Rate limit exceeded | 429 | Too many requests |
+| Circuit breaker open | 503 | Provider temporarily unavailable |
 
 ---
 
 ## Project Structure
 
 ```
-├── app.py                 # FastAPI entrypoint
+├── app.py                     # FastAPI entrypoint
 ├── gateway/
-│   ├── config.py          # Environment configuration
-│   ├── cache.py           # Redis caching
-│   ├── token_reduction.py # Truncation & boilerplate removal
-│   ├── circuit_breaker.py # Reliability
-│   ├── smart_routing.py   # Model selection
+│   ├── config.py              # Environment configuration
+│   ├── anthropic_client.py    # Claude provider
+│   ├── providers/
+│   │   └── ollama.py          # Local Ollama provider
+│   ├── cache.py               # Redis caching
+│   ├── token_reduction.py     # Truncation & boilerplate removal
+│   ├── smart_routing.py       # Complexity-based model selection
+│   ├── circuit_breaker.py     # Reliability patterns
 │   ├── routers/
-│   │   ├── openai.py      # /v1/chat/completions
-│   │   ├── admin.py       # /admin/* endpoints
-│   │   └── health.py      # /health
+│   │   ├── openai.py          # /v1/chat/completions
+│   │   ├── chat.py            # /chat
+│   │   ├── admin.py           # /admin/* endpoints
+│   │   └── health.py          # /health
 │   └── ...
 └── docs/
-    └── USER_GUIDE.md      # Detailed usage guide
+    └── USER_GUIDE.md          # Detailed usage guide
 ```
 
 ---
 
 ## Documentation
 
-- [User Guide](docs/USER_GUIDE.md) - Complete setup and configuration guide
-- [API Reference](#api-endpoints) - Available endpoints
-- [Environment Variables](#environment-variables) - All configuration options
+- [User Guide](docs/USER_GUIDE.md) – Complete setup and configuration
+- [API Reference](#api-reference) – Endpoints and request format
+- [Environment Variables](#environment-variables) – All configuration options
 
 ---
 
@@ -255,4 +431,4 @@ MIT
 
 ## Keywords
 
-`claude` `anthropic` `openai-compatible` `api-gateway` `llm-proxy` `ai-gateway` `cursor` `continue` `token-optimization` `prompt-caching` `fastapi` `python` `claude-sonnet` `claude-opus` `ai-infrastructure` `cost-optimization` `rate-limiting` `circuit-breaker`
+`ai-gateway` `llm-proxy` `openai-compatible` `anthropic` `claude` `ollama` `multi-provider` `cursor` `continue` `token-optimization` `prompt-caching` `fastapi` `python` `smart-routing` `cost-optimization` `rate-limiting` `circuit-breaker` `self-hosted` `local-llm`

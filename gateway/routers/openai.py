@@ -25,6 +25,8 @@ from gateway.config import (
     DATABASE_URL,
     RETRY_ENABLED,
     RETRY_MAX_ATTEMPTS,
+    LOCAL_LLM_DEFAULT_MODEL,
+    LOCAL_LLM_MODEL_ALLOWLIST,
 )
 from gateway.logging_setup import log
 from gateway.routing import route_model_from_messages, with_model_prefix, strip_model_prefix, VALID_ANTHROPIC_MODELS, get_fallback_model
@@ -68,6 +70,86 @@ from gateway.telemetry import emit_error, emit_request
 from gateway.db import calculate_cost, record_usage_to_db
 
 router = APIRouter()
+
+
+def is_local_provider_request(parsed: Dict[str, Any]) -> bool:
+    """Check if request should be routed to local Ollama provider."""
+    provider = parsed.get("provider")
+    if provider == "local":
+        return True
+    
+    model = parsed.get("model") or ""
+    if model.startswith("local:") or model.startswith("ollama:"):
+        return True
+    
+    return False
+
+
+def extract_local_model(parsed: Dict[str, Any]) -> Optional[str]:
+    """Extract model name for local provider, stripping any prefix."""
+    model = parsed.get("model") or ""
+    
+    if model.startswith("local:"):
+        return model[6:] or None
+    if model.startswith("ollama:"):
+        return model[7:] or None
+    
+    return model if model else None
+
+
+async def handle_local_provider(
+    parsed: Dict[str, Any],
+    ray: str,
+    t0: float,
+) -> JSONResponse:
+    """Handle request via local Ollama provider and return OpenAI-formatted response."""
+    from gateway.providers.ollama import call_ollama_openai_format, validate_local_model
+    import hashlib
+    
+    messages = parsed.get("messages", [])
+    local_model = extract_local_model(parsed)
+    resolved_model = validate_local_model(local_model)
+    
+    oa_messages = []
+    for m in messages:
+        role = m.get("role", "user") if isinstance(m, dict) else getattr(m, "role", "user")
+        content = m.get("content", "") if isinstance(m, dict) else getattr(m, "content", "")
+        
+        if isinstance(content, list):
+            text_parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text_parts.append(block.get("text", ""))
+                elif isinstance(block, str):
+                    text_parts.append(block)
+            content = "\n".join(text_parts)
+        
+        oa_messages.append({"role": role, "content": content or ""})
+    
+    max_tokens = int(parsed.get("max_tokens") or DEFAULT_MAX_TOKENS)
+    temperature = parsed.get("temperature") if parsed.get("temperature") is not None else 0.2
+    
+    request_id = f"chatcmpl_local_{hashlib.sha1((ray + str(time.time())).encode()).hexdigest()[:12]}"
+    
+    result = await call_ollama_openai_format(
+        messages=oa_messages,
+        model=resolved_model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        request_id=request_id,
+    )
+    
+    dt_ms = int((time.time() - t0) * 1000)
+    log.info(
+        "OA LOCAL OK (cf-ray=%s) model=%s ms=%d",
+        ray, resolved_model, dt_ms
+    )
+    
+    response = JSONResponse(content=result)
+    response.headers["X-Gateway"] = "claude-gateway"
+    response.headers["X-Model-Source"] = "local"
+    response.headers["X-Provider"] = "ollama"
+    return response
 
 
 async def get_project_context(request: Request) -> tuple[Optional[int], Optional[str], int]:
@@ -141,6 +223,9 @@ async def openai_chat_completions(req: Request):
 
     ray = req.headers.get("cf-ray") or ""
     t0 = time.time()
+
+    if is_local_provider_request(parsed):
+        return await handle_local_provider(parsed, ray, t0)
 
     project_id, project_name, rate_limit_rpm = await get_project_context(req)
 
@@ -1041,6 +1126,13 @@ async def openai_models(req: Request):
     for m in VALID_ANTHROPIC_MODELS:
         base_models.append({"id": m, "object": "model"})
         base_models.append({"id": with_model_prefix(m), "object": "model"})
+
+    for local_model in LOCAL_LLM_MODEL_ALLOWLIST:
+        base_models.append({"id": f"local:{local_model}", "object": "model"})
+        base_models.append({"id": f"ollama:{local_model}", "object": "model"})
+    
+    if LOCAL_LLM_DEFAULT_MODEL:
+        base_models.append({"id": f"local:{LOCAL_LLM_DEFAULT_MODEL}", "object": "model"})
 
     seen = set()
     data = []
