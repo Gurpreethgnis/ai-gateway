@@ -43,7 +43,8 @@ async def lifespan(app: FastAPI):
         init_db()
         for attempt in range(3):
             try:
-                await asyncio.wait_for(create_tables(), timeout=15)
+                # Pool timeout is 60s by default; allow create_tables() time to connect + run
+                await asyncio.wait_for(create_tables(), timeout=70)
                 log.info("Database initialized successfully")
                 break
             except (asyncio.TimeoutError, Exception) as e:

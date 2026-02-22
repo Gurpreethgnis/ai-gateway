@@ -190,13 +190,16 @@ def init_db():
     elif db_url.startswith("postgresql://"):
         db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
     
+    # Railway Postgres can cold-start slowly; allow up to 60s to get a connection
+    pool_timeout = int(os.getenv("DB_POOL_TIMEOUT", "60"))
+    
     engine = create_async_engine(
         db_url,
         echo=False,
         pool_pre_ping=True,
         pool_size=10,
         max_overflow=5,
-        pool_timeout=10,
+        pool_timeout=pool_timeout,
         pool_recycle=300,
         connect_args={
             "server_settings": {

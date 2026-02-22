@@ -304,10 +304,10 @@ async def _get_recent_requests(limit: int = 20) -> list[dict]:
                 })
             return rows
     
-    timeout_s = 8.0
+    timeout_s = 15.0
     try:
         import os
-        timeout_s = float(os.getenv("DASHBOARD_RECENT_REQUESTS_TIMEOUT", "8"))
+        timeout_s = float(os.getenv("DASHBOARD_RECENT_REQUESTS_TIMEOUT", "15"))
     except (ValueError, TypeError):
         pass
     try:
