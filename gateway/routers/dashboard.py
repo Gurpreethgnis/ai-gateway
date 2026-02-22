@@ -176,7 +176,7 @@ DASHBOARD_HTML = """
                 <h1>AI Gateway Insights</h1>
                 <p style="color: var(--text-dim)">Real-time Claude token savings dashboard</p>
             </div>
-            <button class="refresh-btn" onclick="window.location.reload()">Refresh Data</button>
+            <button class="refresh-btn" onclick="window.location.href='/dashboard?refresh=True'">Refresh Data</button>
         </header>
 
         <div class="stats-grid">
@@ -268,8 +268,21 @@ DASHBOARD_HTML = """
 """
 
 @router.get("/dashboard", response_class=HTMLResponse)
-async def get_dashboard(request: Request):
+async def get_dashboard(request: Request, refresh: bool = False):
     from gateway.db import async_session_factory
+    from gateway.cache import rds
+    import json
+
+    # 1. Try Cache First (unless refresh=True)
+    cache_key = "dashboard_html_v2"
+    if rds and not refresh:
+        try:
+            cached_html = rds.get(cache_key)
+            if cached_html:
+                return HTMLResponse(content=cached_html)
+        except Exception:
+            pass
+
     if async_session_factory is None:
         return HTMLResponse(content="""
 <!DOCTYPE html>
@@ -307,13 +320,16 @@ async def get_dashboard(request: Request):
 
     try:
         async with get_session() as session:
-            # Aggregates
+            # Aggregates - Limit to last 90 days to avoid full table scan timeouts
+            window = datetime.utcnow() - timedelta(days=90)
+            
             try:
+                # Total input and cost for last 90 days
                 total_q = await session.execute(
                     select(
                         func.sum(UsageRecord.input_tokens),
                         func.sum(UsageRecord.cost_usd)
-                    )
+                    ).where(UsageRecord.timestamp >= window)
                 )
                 result = total_q.fetchone()
                 if result:
@@ -327,26 +343,29 @@ async def get_dashboard(request: Request):
 
             total_input = total_input or 0
             total_cost = total_cost or 0
-            # Calculate cache efficiency and savings
+            
+            # Calculate cache efficiency and savings for last 90 days
             total_cached = 0
             try:
                 cache_result = await session.execute(
                     select(func.sum(UsageRecord.cache_read_input_tokens))
+                    .where(UsageRecord.timestamp >= window)
                 )
                 total_cached = cache_result.scalar() or 0
             except Exception as e:
                 import logging
                 logging.getLogger("gateway").error("Dashboard cache query failed: %r", e)
             
-            # Calculate gateway savings (pruning, stripping, etc.)
+            # Calculate gateway savings for last 90 days
             total_gateway_saved = 0
             try:
                 gateway_result = await session.execute(
                     select(func.sum(UsageRecord.gateway_tokens_saved))
+                    .where(UsageRecord.timestamp >= window)
                 )
                 total_gateway_saved = gateway_result.scalar() or 0
             except Exception:
-                # Column may not exist yet in older databases
+                # Column may not exist yet in older databases or query failed
                 total_gateway_saved = 0
             
             total_processed = total_input + total_cached + total_gateway_saved
@@ -359,7 +378,6 @@ async def get_dashboard(request: Request):
             
             active_connections = 0
             try:
-                from gateway.cache import rds
                 if rds:
                     active_connections = rds.zcard("concurrency:anthropic:sonnet") or 0
             except:
@@ -428,7 +446,14 @@ async def get_dashboard(request: Request):
         else:
             final_html = html # Fallback if split fails
             
-        return final_html
+        # Cache the final HTML for 5 minutes (300 seconds)
+        if rds:
+            try:
+                rds.setex(cache_key, 300, final_html)
+            except Exception:
+                pass
+
+        return HTMLResponse(content=final_html)
 
     except Exception as e:
         import traceback

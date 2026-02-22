@@ -38,15 +38,15 @@ class UsageRecord(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"), nullable=True)
     model: Mapped[str] = mapped_column(String(100), nullable=False)
-    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    cache_read_input_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    cache_read_input_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None, index=True)
     cache_creation_input_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
-    gateway_tokens_saved: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    gateway_tokens_saved: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None, index=True)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0, index=True)
     cached: Mapped[bool] = mapped_column(default=False)
     cf_ray: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
     project: Mapped[Optional["Project"]] = relationship(back_populates="usage_records")
 
@@ -189,17 +189,22 @@ async def create_tables():
             
         # Make cache-related columns nullable if they exist
         try:
-            await conn.execute(text("ALTER TABLE usage_records ALTER COLUMN cache_read_input_tokens DROP NOT NULL"))
-        except Exception:
-            pass  # column may not exist or already nullable
-        try:
-            await conn.execute(text("ALTER TABLE usage_records ALTER COLUMN cache_creation_input_tokens DROP NOT NULL"))
-        except Exception:
-            pass  # column may not exist or already nullable
-        try:
             await conn.execute(text("ALTER TABLE usage_records ALTER COLUMN gateway_tokens_saved DROP NOT NULL"))
         except Exception:
             pass  # column may not exist or already nullable
+
+        # Add indexes for aggregation performance
+        idx_cmds = [
+            "CREATE INDEX IF NOT EXISTS ix_usage_input_tokens ON usage_records (input_tokens)",
+            "CREATE INDEX IF NOT EXISTS ix_usage_cost_usd ON usage_records (cost_usd)",
+            "CREATE INDEX IF NOT EXISTS ix_usage_cache_read ON usage_records (cache_read_input_tokens)",
+            "CREATE INDEX IF NOT EXISTS ix_usage_gateway_saved ON usage_records (gateway_tokens_saved)"
+        ]
+        for cmd in idx_cmds:
+            try:
+                await conn.execute(text(cmd))
+            except Exception:
+                pass
 
 
 @asynccontextmanager
