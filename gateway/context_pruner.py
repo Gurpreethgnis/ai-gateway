@@ -261,6 +261,63 @@ def strip_orphaned_tool_results(messages: List[Dict[str, Any]]) -> List[Dict[str
     return result
 
 
+def strip_orphaned_tool_use(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Remove tool_use blocks from assistant messages that don't have a corresponding 
+    tool_result in the following user messages. This ensures Anthropic API doesn't 
+    reject requests with orphaned tool_use blocks.
+    """
+    # Build set of all tool_result IDs from user messages
+    available_tool_result_ids = set()
+    for msg in messages:
+        if msg.get("role") == "user":
+            content = msg.get("content", [])
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        tool_id = block.get("tool_use_id") or block.get("tool_result_for")
+                        if tool_id:
+                            available_tool_result_ids.add(tool_id)
+    
+    # Filter messages to remove orphaned tool_use blocks
+    result = []
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", [])
+        
+        # Only process assistant messages with list content (potential tool_use)
+        if role == "assistant" and isinstance(content, list):
+            # Filter out orphaned tool_use blocks
+            filtered_blocks = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "tool_use":
+                        tool_id = block.get("id")
+                        if tool_id:
+                            # This is a tool_use block - check if tool_result exists
+                            if tool_id in available_tool_result_ids:
+                                filtered_blocks.append(block)
+                            else:
+                                log.debug("Stripping orphaned tool_use: %s", tool_id)
+                        else:
+                            # tool_use without ID, keep it (malformed but not our problem)
+                            filtered_blocks.append(block)
+                    else:
+                        # Not a tool_use block, keep it
+                        filtered_blocks.append(block)
+                else:
+                    filtered_blocks.append(block)
+            
+            # Only add message if it has content left
+            if filtered_blocks:
+                result.append({**msg, "content": filtered_blocks})
+            # If all blocks were removed, skip the message entirely
+        else:
+            result.append(msg)
+    
+    return result
+
+
 async def prune_context(
     messages: List[Dict[str, Any]],
     max_tokens: int = CONTEXT_MAX_TOKENS,
@@ -340,8 +397,9 @@ async def prune_context(
 
     pruned.extend(recent_messages)
     
-    # Final safety: strip any orphaned tool_results that slipped through
+    # Final safety: strip any orphaned tool_results and tool_use blocks
     pruned = strip_orphaned_tool_results(pruned)
+    pruned = strip_orphaned_tool_use(pruned)
 
     final_tokens = estimate_messages_tokens(pruned) + system_tokens
 
@@ -362,8 +420,9 @@ async def prune_context(
                     pruned.pop(i)
                     break
         
-        # Re-strip orphaned tool_results after aggressive pruning
+        # Re-strip orphaned tool_results and tool_use after aggressive pruning
         pruned = strip_orphaned_tool_results(pruned)
+        pruned = strip_orphaned_tool_use(pruned)
 
     meta["final_messages"] = len(pruned)
     meta["final_tokens"] = estimate_messages_tokens(pruned) + system_tokens

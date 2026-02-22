@@ -118,13 +118,60 @@ def get_last_user_message_text(messages: List[Dict[str, Any]], max_chars: int = 
     return ""
 
 
+def get_user_intent_text(messages: List[Dict[str, Any]], max_chars: int = 600) -> str:
+    """
+    Extract the user's actual intent from the last user message.
+    In Cursor/IDE messages, the user's question is typically the LAST (shortest) text block,
+    after all the file context. This avoids treating file content as the question.
+    
+    Returns the shortest text block (likely the actual question), or the last block if all similar length.
+    """
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        
+        if isinstance(content, str):
+            # Simple string content, return as-is
+            return content[:max_chars] if max_chars else content
+        
+        if isinstance(content, list):
+            # Extract all text blocks
+            text_blocks = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "").strip()
+                    if text:  # Skip empty blocks
+                        text_blocks.append(text)
+            
+            if not text_blocks:
+                return ""
+            
+            # Return the shortest text block (likely the user's actual question)
+            # If all blocks are similar length, return the last one
+            shortest = min(text_blocks, key=len)
+            last = text_blocks[-1]
+            
+            # If the shortest is < 50% of the last block's length, it's likely the question
+            if len(shortest) < len(last) * 0.5:
+                result = shortest
+            else:
+                # Blocks are similar length, use the last one (user's question comes last)
+                result = last
+            
+            return result[:max_chars] if max_chars else result
+    
+    return ""
+
+
 def is_simple_question_last_message(messages: List[Dict[str, Any]]) -> bool:
     """True if the last user message looks like a simple explanation/summary question."""
-    last_text = get_last_user_message_text(messages, max_chars=600).strip().lower()
-    if not last_text or len(last_text) > 500:
+    # Use get_user_intent_text to extract the actual question, not file context
+    intent_text = get_user_intent_text(messages, max_chars=600).strip().lower()
+    if not intent_text or len(intent_text) > 500:
         return False
-    return any(p in last_text for p in SIMPLE_QUESTION_PATTERNS) or any(
-        p in last_text for p in LOCAL_TASK_PATTERNS
+    return any(p in intent_text for p in SIMPLE_QUESTION_PATTERNS) or any(
+        p in intent_text for p in LOCAL_TASK_PATTERNS
     )
 
 
@@ -157,11 +204,17 @@ def compute_routing_signals(
     
     # ========== FORCE CLAUDE (high confidence) ==========
     
-    # Active tool-use loop: check only last 4 messages for tool_result blocks
-    # (old tool_result blocks from history don't affect current routing decision)
-    recent_messages = messages[-4:] if len(messages) > 4 else messages
-    for msg in recent_messages:
-        content = msg.get("content", "")
+    # Active tool-use loop: check if the LAST user message contains tool_result blocks
+    # (this means we're mid-loop processing tool output, need Claude)
+    # Historical tool_results from earlier messages are irrelevant to current routing
+    last_user_msg = None
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            last_user_msg = msg
+            break
+    
+    if last_user_msg:
+        content = last_user_msg.get("content", "")
         if isinstance(content, list):
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "tool_result":
@@ -212,11 +265,11 @@ def compute_routing_signals(
             )
     
     # Deep reasoning keywords (architecture, security, etc.)
-    # Check last user message only, not full conversation (avoids system prompt pollution)
-    last_user_text = get_last_user_message_text(messages, max_chars=None).lower()
+    # Check user intent only, not full message with file context
+    user_intent = get_user_intent_text(messages, max_chars=None).lower()
     deep_keywords_found = []
     for keyword in CLAUDE_DEEP_REASONING_KEYWORDS:
-        if keyword in last_user_text:
+        if keyword in user_intent:
             deep_keywords_found.append(keyword)
     
     if len(deep_keywords_found) >= 2:
@@ -471,11 +524,11 @@ async def route_request(
     
     if signals.band == "CLAUDE":
         # High confidence: route to Claude, now decide sonnet vs opus
-        # Score based on last user message intent, not full conversation history
-        last_user_text = get_last_user_message_text(messages, max_chars=None)
+        # Score based on user intent (extracted question), not full message with file context
+        user_intent = get_user_intent_text(messages, max_chars=None)
         is_simple_q = is_simple_question_last_message(messages)
-        keyword_score, keyword_reasons = compute_keyword_score(last_user_text)
-        complexity_score, complexity_reasons = compute_complexity_score(messages, tools, last_user_text, is_simple_q)
+        keyword_score, keyword_reasons = compute_keyword_score(user_intent)
+        complexity_score, complexity_reasons = compute_complexity_score(messages, tools, user_intent, is_simple_q)
         historical_score = await get_historical_score(project_id, OPUS_MODEL)
         
         total_score = keyword_score + complexity_score + historical_score
@@ -772,12 +825,12 @@ async def should_use_opus(
             phase="explicit",
         )
 
-    # Use last user message for scoring in legacy mode too
-    last_user_text = get_last_user_message_text(messages, max_chars=None)
+    # Use user intent for scoring in legacy mode too
+    user_intent = get_user_intent_text(messages, max_chars=None)
     is_simple_q = is_simple_question_last_message(messages)
 
-    keyword_score, keyword_reasons = compute_keyword_score(last_user_text)
-    complexity_score, complexity_reasons = compute_complexity_score(messages, tools, last_user_text, is_simple_q)
+    keyword_score, keyword_reasons = compute_keyword_score(user_intent)
+    complexity_score, complexity_reasons = compute_complexity_score(messages, tools, user_intent, is_simple_q)
 
     historical_score = await get_historical_score(project_id, OPUS_MODEL)
 

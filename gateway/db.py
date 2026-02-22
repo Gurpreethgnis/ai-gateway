@@ -203,6 +203,7 @@ def init_db():
         pool_timeout=pool_timeout,
         pool_recycle=300,
         connect_args={
+            "command_timeout": 30,  # Fail individual commands after 30s
             "server_settings": {
                 "statement_timeout": "5000"
             }
@@ -252,27 +253,35 @@ async def create_tables():
 
 
 async def background_db_init():
-    """Initialize database in background with retry logic. Non-blocking for app startup."""
+    """
+    Initialize database in background with unlimited retry logic. 
+    Non-blocking for app startup. Retries indefinitely since the gateway runs fine without DB.
+    """
     global db_ready
     import asyncio
     import logging
     
     log = logging.getLogger("gateway")
     
-    for attempt in range(3):
+    attempt = 0
+    wait = 3  # Start with 3s backoff
+    
+    while True:
+        attempt += 1
         try:
             # Pool timeout is 60s by default; allow create_tables() time to connect + run
             await asyncio.wait_for(create_tables(), timeout=70)
             db_ready = True
-            log.info("Database initialized successfully")
+            log.info("Database initialized successfully after %d attempt(s)", attempt)
             return
         except (asyncio.TimeoutError, Exception) as e:
-            if attempt < 2:
-                wait = (attempt + 1) * 3
-                log.warning("Database init attempt %d failed: %r, retrying in %ds", attempt + 1, e, wait)
-                await asyncio.sleep(wait)
-            else:
-                log.warning("Database initialization failed after 3 attempts: %r (gateway will run without DB)", e)
+            log.warning(
+                "Database init attempt %d failed: %r, retrying in %ds", 
+                attempt, e, wait
+            )
+            await asyncio.sleep(wait)
+            # Exponential backoff: 3s, 6s, 12s, 24s, 48s, then cap at 60s
+            wait = min(wait * 2, 60)
 
 
 @asynccontextmanager
