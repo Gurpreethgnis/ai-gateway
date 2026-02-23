@@ -19,7 +19,8 @@ if REDIS_URL and redis is not None:
             socket_timeout=3,
             socket_connect_timeout=3
         )
-        rds.ping()
+        # Do not ping at import: avoids blocking startup if Redis is slow/unreachable.
+        # First use will establish the connection; health reports redis=True when client exists.
     except Exception as e:
         log.warning("Redis disabled: %r", e)
         rds = None

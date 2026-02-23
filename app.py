@@ -29,15 +29,19 @@ setup_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Clear any stale concurrency slots left over from previous deployments
-    try:
-        from gateway.cache import rds
-        if rds:
-            for family in ("sonnet", "opus", "haiku", "default"):
-                rds.delete(f"concurrency:anthropic:{family}")
-            log.info("Cleared stale concurrency slots from Redis")
-    except Exception as e:
-        log.warning("Could not clear Redis concurrency slots: %r", e)
+    # Clear any stale concurrency slots in a background task so Redis I/O never blocks startup.
+    def _clear_redis_slots():
+        try:
+            from gateway.cache import rds
+            if rds:
+                for family in ("sonnet", "opus", "haiku", "default"):
+                    rds.delete(f"concurrency:anthropic:{family}")
+                log.info("Cleared stale concurrency slots from Redis")
+        except Exception as e:
+            log.warning("Could not clear Redis concurrency slots: %r", e)
+
+    import asyncio
+    asyncio.create_task(asyncio.to_thread(_clear_redis_slots))
 
     # Initialize database in background (non-blocking)
     if DATABASE_URL:
@@ -46,24 +50,27 @@ async def lifespan(app: FastAPI):
         init_db()  # Creates engine config (instant, no connection)
         app.state.db_init_task = asyncio.create_task(background_db_init())
         log.info("Database initialization started in background")
-    
-    # Initialize model registry
-    try:
-        from gateway.model_registry import get_model_registry
-        registry = get_model_registry()
-        await registry.initialize()
-        log.info("Model registry initialized with %d models", len(registry.get_all_models()))
-    except Exception as e:
-        log.warning("Could not initialize model registry: %r", e)
-    
-    # Initialize provider registry
-    try:
-        from gateway.providers.registry import get_provider_registry
-        provider_registry = get_provider_registry()
-        providers = provider_registry.get_available_providers()
-        log.info("Provider registry initialized: %s", list(providers.keys()))
-    except Exception as e:
-        log.warning("Could not initialize provider registry: %r", e)
+
+    # Run model and provider registry init in background so server can accept
+    # connections (and /health) quickly; avoids Railway healthcheck timeout.
+    import asyncio
+    async def _init_registries():
+        try:
+            from gateway.model_registry import get_model_registry
+            registry = get_model_registry()
+            await registry.initialize()
+            log.info("Model registry initialized with %d models", len(registry.get_all_models()))
+        except Exception as e:
+            log.warning("Could not initialize model registry: %r", e)
+        try:
+            from gateway.providers.registry import get_provider_registry
+            provider_registry = get_provider_registry()
+            await provider_registry.initialize()
+            providers = provider_registry.get_available_providers()
+            log.info("Provider registry initialized: %s", list(providers.keys()))
+        except Exception as e:
+            log.warning("Could not initialize provider registry: %r", e)
+    asyncio.create_task(_init_registries())
     
     yield
 

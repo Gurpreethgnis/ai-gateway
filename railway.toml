@@ -1,5 +1,8 @@
+# Railway deployment config (see https://docs.railway.app/reference/config-as-code)
+# Build uses Dockerfile when present.
+
 [build]
-builder = "nixpacks"
+builder = "DOCKERFILE"
 
 [deploy]
 startCommand = "python run_server.py"

@@ -82,6 +82,9 @@ This gateway sits between your clients and AI providers:
 
 ### 2. Set Environment Variables
 
+**Required:** Set `GATEWAY_API_KEY` in Railway Variables (Dashboard → your service → Variables).  
+If it is missing, the app exits on startup and the deployment healthcheck will fail with "service unavailable."
+
 **Minimum (Claude only):**
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...    # Anthropic API key
