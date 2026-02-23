@@ -1,6 +1,9 @@
 # AI Gateway - Production Dockerfile
 # In use only when Railway builds with Docker (see railway.toml).
 # To use this file: rename to "Dockerfile" or set RAILWAY_DOCKERFILE_PATH=Dockerfile.railway-docker.
+#
+# When using Docker, deploy settings in railway.toml (e.g. healthcheckTimeout) may not apply.
+# In Railway Variables, set PORT=8080 and optionally RAILWAY_HEALTHCHECK_TIMEOUT_SEC=600 for a 10min retry window.
 # Multi-stage build for smaller final image
 
 # ==============================================================================
@@ -49,17 +52,17 @@ COPY --chown=app:app . .
 # Switch to non-root user
 USER app
 
-# Environment defaults
+# Environment defaults (Railway injects PORT at runtime; 8080 matches start.sh default)
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PORT=8000
+    PORT=8080
 
-# Health check (use /live for minimal dependency; PORT is set at runtime)
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+# Health check (use /live; PORT is set at runtime by Railway)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
     CMD curl -f http://127.0.0.1:${PORT}/live || exit 1
 
 # Expose port
 EXPOSE ${PORT}
 
-# Echo so logs show container started; then run the app (exec replaces shell so Python is PID 1)
-CMD ["sh", "-c", "echo 'Container CMD started, starting Python' >&2 && exec python run_server.py"]
+# Use start.sh so PORT is defaulted if not set (same as Railpack/Procfile)
+CMD ["sh", "start.sh"]

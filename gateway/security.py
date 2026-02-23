@@ -17,7 +17,7 @@ def extract_gateway_api_key(request: Request) -> Optional[str]:
     return None
 
 def is_public_path(path: str) -> bool:
-    return path in ("/", "/favicon.ico", "/metrics", "/health", "/live", "/dashboard") or path.startswith("/js/") or path.startswith("/cdn-cgi/")
+    return path in ("/", "/favicon.ico", "/metrics", "/health", "/live", "/live/", "/dashboard") or path.startswith("/js/") or path.startswith("/cdn-cgi/")
 
 def is_protected_api_path(path: str) -> bool:
     return path.startswith("/v1/") or path in ("/chat", "/debug/origin", "/debug/headers", "/chat/completions")

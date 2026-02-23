@@ -100,8 +100,10 @@ async def root():
 
 
 @app.get("/live")
+@app.get("/live/")
 async def live():
-    """Minimal liveness probe: no dependencies, returns 200 as soon as the process is up."""
+    """Minimal liveness probe: no dependencies, returns 200 as soon as the process is up.
+    Both /live and /live/ return 200 so Railway healthcheck never gets a 307 redirect."""
     return {"live": True}
 
 

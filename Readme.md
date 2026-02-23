@@ -103,6 +103,14 @@ LOCAL_CF_ACCESS_CLIENT_ID=<service-token-id>
 LOCAL_CF_ACCESS_CLIENT_SECRET=<service-token-secret>
 ```
 
+**If the healthcheck fails with "service unavailable":**
+
+- Railway’s healthcheck calls `GET /live` and expects **HTTP 200**. The app listens on the `PORT` Railway provides.
+- **Set `PORT` in Railway Variables** (e.g. `8080`) so the healthcheck uses the same port as the app. This is required if you use a custom/target port.
+- Ensure the app binds to `0.0.0.0` and uses `PORT` (the repo’s `start.sh` and `run_server.py` already do this).
+- If you restrict requests by hostname, allow `healthcheck.railway.app` (see [Railway healthcheck docs](https://docs.railway.app/guides/healthchecks-and-restarts)).
+- The deploy uses a 10-minute healthcheck window; if migrations or cold start are slow, the first few retries may fail before the app is ready.
+
 ### 3. Configure Your Client
 
 **Cursor / Continue:**

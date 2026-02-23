@@ -10,6 +10,6 @@ builder = "RAILPACK"
 preDeployCommand = "python run_migration.py"
 startCommand = "sh start.sh"
 healthcheckPath = "/live"
-healthcheckTimeout = 300
+healthcheckTimeout = 600
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
