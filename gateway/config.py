@@ -163,6 +163,13 @@ ENABLE_RESPONSE_CACHE = os.getenv("ENABLE_RESPONSE_CACHE", "1") == "1"
 RESPONSE_CACHE_TTL = int(os.getenv("RESPONSE_CACHE_TTL", "1800"))  # 30 minutes
 
 # =============================================================================
+# Semantic Caching (NEW)
+# =============================================================================
+ENABLE_SEMANTIC_CACHE = os.getenv("ENABLE_SEMANTIC_CACHE", "0") == "1"  # Off by default
+SEMANTIC_SIMILARITY_THRESHOLD = float(os.getenv("SEMANTIC_SIMILARITY_THRESHOLD", "0.95"))
+SEMANTIC_CACHE_TTL = int(os.getenv("SEMANTIC_CACHE_TTL", "3600"))  # 1 hour
+
+# =============================================================================
 # Context Compression (NEW)
 # =============================================================================
 ENABLE_CONTEXT_COMPRESSION = os.getenv("ENABLE_CONTEXT_COMPRESSION", "1") == "1"
