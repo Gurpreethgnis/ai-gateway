@@ -249,6 +249,7 @@ async def call_ollama(
     model: Optional[str] = None,
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
+    skip_preflight: bool = False,
 ) -> Dict[str, Any]:
     """
     Call Ollama via Cloudflare Access tunnel.
@@ -268,18 +269,21 @@ async def call_ollama(
     headers = build_ollama_headers()
     payload = build_ollama_payload(resolved_model, messages, temperature, max_tokens)
     
-    # Preflight: verify base URL and CF Access work (GET /api/tags)
-    preflight_ok, preflight_msg = await _ollama_preflight(base_url, headers, timeout=8.0)
-    if not preflight_ok:
-        host = base_url.split("//", 1)[-1].split("/")[0] if "//" in base_url else base_url[:50]
-        log.error("OLLAMA PREFLIGHT FAILED host=%s msg=%s", host, preflight_msg)
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "Ollama unreachable from gateway. GET /api/tags failed: " + preflight_msg + ". "
-                "Check LOCAL_LLM_BASE_URL and LOCAL_CF_ACCESS_CLIENT_ID / LOCAL_CF_ACCESS_CLIENT_SECRET in Railway match your curl; same host and CF Access headers."
+    # Preflight: verify base URL and CF Access work (GET /api/tags). Skip when explicitly requested local (e.g. X-Gateway-Provider: local) so we try POST even if GET is blocked from gateway's IP.
+    if not skip_preflight:
+        preflight_ok, preflight_msg = await _ollama_preflight(base_url, headers, timeout=8.0)
+        if not preflight_ok:
+            host = base_url.split("//", 1)[-1].split("/")[0] if "//" in base_url else base_url[:50]
+            log.error("OLLAMA PREFLIGHT FAILED host=%s msg=%s", host, preflight_msg)
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Ollama unreachable from gateway. GET /api/tags failed: " + preflight_msg + ". "
+                    "If curl from your machine works but the gateway (Railway) gets 404, Cloudflare Access is likely allowing only your IP. "
+                    "In Cloudflare Zero Trust → Access → your application: edit the policy that uses the service token and allow it from any IP (or add Railway's egress IPs). "
+                    "Ensure LOCAL_LLM_BASE_URL and CF Access credentials in Railway match your working curl."
+                )
             )
-        )
     
     t0 = time.time()
     host = base_url.split("//", 1)[-1].split("/")[0] if "//" in base_url else base_url[:40]
@@ -311,7 +315,7 @@ async def call_ollama(
             "OLLAMA UPSTREAM ERROR model=%s status=%d ms=%d response=%s",
             resolved_model, resp.status_code, elapsed_ms, response_text
         )
-        detail = _ollama_error_detail(resp.status_code, response_text, resolved_model, preflight_ok=True)
+        detail = _ollama_error_detail(resp.status_code, response_text, resolved_model, preflight_ok=not skip_preflight)
         raise HTTPException(status_code=502, detail=detail)
     
     try:
@@ -341,6 +345,7 @@ async def call_ollama_openai_format(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     request_id: str = "chatcmpl_local",
+    skip_preflight: bool = False,
 ) -> Dict[str, Any]:
     """
     Call Ollama and return response in OpenAI chat.completion format.
@@ -355,13 +360,14 @@ async def call_ollama_openai_format(
     headers = build_ollama_headers()
     payload = build_ollama_payload(resolved_model, messages, temperature, max_tokens)
     
-    preflight_ok, preflight_msg = await _ollama_preflight(base_url, headers, timeout=8.0)
-    if not preflight_ok:
-        log.error("OLLAMA PREFLIGHT FAILED (OpenAI) msg=%s", preflight_msg)
-        raise HTTPException(
-            status_code=502,
-            detail="Ollama unreachable from gateway. GET /api/tags failed: " + preflight_msg + ". Check LOCAL_LLM_BASE_URL and CF Access credentials in Railway."
-        )
+    if not skip_preflight:
+        preflight_ok, preflight_msg = await _ollama_preflight(base_url, headers, timeout=8.0)
+        if not preflight_ok:
+            log.error("OLLAMA PREFLIGHT FAILED (OpenAI) msg=%s", preflight_msg)
+            raise HTTPException(
+                status_code=502,
+                detail="Ollama unreachable from gateway. GET /api/tags failed: " + preflight_msg + ". Check LOCAL_LLM_BASE_URL and CF Access credentials in Railway."
+            )
     
     t0 = time.time()
     log.info("OLLAMA REQUEST (OpenAI) model=%s messages=%d", resolved_model, len(messages))
@@ -392,7 +398,7 @@ async def call_ollama_openai_format(
             "OLLAMA UPSTREAM ERROR (OpenAI) model=%s status=%d ms=%d response=%s",
             resolved_model, resp.status_code, elapsed_ms, response_text
         )
-        detail = _ollama_error_detail(resp.status_code, response_text, resolved_model, preflight_ok=True)
+        detail = _ollama_error_detail(resp.status_code, response_text, resolved_model, preflight_ok=not skip_preflight)
         raise HTTPException(status_code=502, detail=detail)
     
     try:

@@ -137,6 +137,7 @@ async def handle_local_provider(
         temperature=temperature,
         max_tokens=max_tokens,
         request_id=request_id,
+        skip_preflight=True,  # explicit local request: try POST directly in case GET is blocked from gateway IP (e.g. Cloudflare)
     )
     
     dt_ms = int((time.time() - t0) * 1000)
