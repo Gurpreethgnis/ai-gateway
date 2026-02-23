@@ -722,22 +722,11 @@ async def openai_chat_completions(req: Request):
                         created = int(time.time())
                         async def _local_sse():
                             # Content delta chunk(s) - send as one chunk so client sees the reply
-                            yield f"data: {json.dumps({
-                                'id': chunk_id,
-                                'object': 'chat.completion.chunk',
-                                'created': created,
-                                'model': with_model_prefix(local_model_id),
-                                'choices': [{'index': 0, 'delta': {'content': local_content}, 'finish_reason': None}],
-                            }, ensure_ascii=False)}\n\n"
+                            content_chunk = {"id": chunk_id, "object": "chat.completion.chunk", "created": created, "model": with_model_prefix(local_model_id), "choices": [{"index": 0, "delta": {"content": local_content}, "finish_reason": None}]}
+                            yield f"data: {json.dumps(content_chunk, ensure_ascii=False)}\n\n"
                             # Final chunk with finish_reason and usage
-                            yield f"data: {json.dumps({
-                                'id': chunk_id,
-                                'object': 'chat.completion.chunk',
-                                'created': created,
-                                'model': with_model_prefix(local_model_id),
-                                'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}],
-                                'usage': local_usage,
-                            }, ensure_ascii=False)}\n\n"
+                            final_chunk = {"id": chunk_id, "object": "chat.completion.chunk", "created": created, "model": with_model_prefix(local_model_id), "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": local_usage}
+                            yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
                             yield "data: [DONE]\n\n"
                         return StreamingResponse(
                             _local_sse(),
