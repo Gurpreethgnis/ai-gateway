@@ -684,7 +684,8 @@ async def openai_chat_completions(req: Request):
                 
                 # If cascade returned a valid local response, return it immediately
                 if local_response:
-                    local_content = local_response.get("content", "")
+                    # call_ollama returns {"text": ...}; OpenAI format uses "content"
+                    local_content = local_response.get("content") or local_response.get("text") or ""
                     log.info("Cascade: returning local response (length=%d)", len(local_content))
                     
                     # Return local response in OpenAI format
@@ -698,9 +699,10 @@ async def openai_chat_completions(req: Request):
                     }
                     
                     latency_ms = int((time.time() - t0) * 1000)
+                    ua = req.headers.get("user-agent", "")
                     log.info(
                         "REQ POST /v1/chat/completions -> 200 (%dms) cf-ray=%s ua=%s",
-                        latency_ms, ray, user_agent
+                        latency_ms, ray, ua
                     )
                     
                     # Log routing outcome
