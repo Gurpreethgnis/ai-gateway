@@ -11,6 +11,17 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 8000))
     workers = int(os.environ.get("WEB_CONCURRENCY", "1"))
+    print(f"Gateway starting PORT={port} WORKERS={workers}", file=sys.stderr, flush=True)
+
+    # Pre-import app so any import error is visible in Railway logs (traceback to stderr).
+    try:
+        from app import app  # noqa: F401 - used to validate import
+    except Exception:
+        import traceback
+        print("FATAL: Failed to load app:", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
+
     uvicorn.run(
         "app:app",
         host="0.0.0.0",
