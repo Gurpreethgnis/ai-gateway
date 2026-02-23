@@ -9,7 +9,7 @@ if __name__ == "__main__":
         print("FATAL: GATEWAY_API_KEY is not set. Set it in Railway Variables.", file=sys.stderr)
         sys.exit(1)
 
-    port = int(os.environ.get("PORT", 8000))
+    port = int(os.environ.get("PORT", "8080"))
     workers = int(os.environ.get("WEB_CONCURRENCY", "1"))
     print(f"Gateway starting PORT={port} WORKERS={workers}", file=sys.stderr, flush=True)
 

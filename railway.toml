@@ -1,11 +1,12 @@
-# Railway deployment config (see https://docs.railway.app/reference/config-as-code)
-# Build uses Dockerfile when present.
+# Railway deployment config
+# With no Dockerfile in repo root, Railway uses Railpack (Nixpacks-style) and runs Procfile.
+# To use Docker again: rename Dockerfile.railway-docker to Dockerfile, or set
+#   RAILWAY_DOCKERFILE_PATH=Dockerfile.railway-docker  and  builder = "DOCKERFILE"
 
 [build]
-builder = "DOCKERFILE"
+builder = "RAILPACK"
 
 [deploy]
-startCommand = "python run_server.py"
 healthcheckPath = "/live"
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"

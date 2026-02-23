@@ -1,4 +1,6 @@
 # AI Gateway - Production Dockerfile
+# In use only when Railway builds with Docker (see railway.toml).
+# To use this file: rename to "Dockerfile" or set RAILWAY_DOCKERFILE_PATH=Dockerfile.railway-docker.
 # Multi-stage build for smaller final image
 
 # ==============================================================================
@@ -52,12 +54,12 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PORT=8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:${PORT}/health || exit 1
+# Health check (use /live for minimal dependency; PORT is set at runtime)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://127.0.0.1:${PORT}/live || exit 1
 
 # Expose port
 EXPOSE ${PORT}
 
-# Run with uvicorn for production (Python reads PORT env var directly)
-CMD ["python", "run_server.py"]
+# Echo so logs show container started; then run the app (exec replaces shell so Python is PID 1)
+CMD ["sh", "-c", "echo 'Container CMD started, starting Python' >&2 && exec python run_server.py"]
