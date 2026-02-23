@@ -7,7 +7,7 @@ quality before returning it. If quality is insufficient, we escalate to Claude.
 
 import re
 from typing import Dict, Any, Optional, Tuple
-from gateway.config import CASCADE_QUALITY_CHECK_MODE, CASCADE_MIN_RESPONSE_LENGTH
+from gateway.config import CASCADE_QUALITY_CHECK_MODE
 from gateway.logging_setup import log
 
 
@@ -79,24 +79,10 @@ def _heuristic_quality_check(response_text: str, query_text: str) -> Tuple[bool,
         if pattern in response_lower[:200]:  # Check first 200 chars for refusal
             return False, 0.1, f"refusal_pattern:{pattern}"
     
-    # Check 2: Minimum response length (context-aware)
-    min_length = CASCADE_MIN_RESPONSE_LENGTH
+    # Don't use length as a quality signal: short correct answers ("6", "Yes") are valid.
+    # We only rejected empty above. No minimum-length failure.
     
-    # Adjust based on query type
-    if any(keyword in query_lower for keyword in ["explain", "how", "what", "why", "describe"]):
-        min_length = max(min_length, 150)  # Explanations need more text
-    
-    if any(keyword in query_lower for keyword in ["code", "function", "implement", "write"]):
-        min_length = max(min_length, 100)  # Code requests need substance
-    
-    # Short factual questions ("what is 4+2") can have very short correct answers
-    if len(query_lower) < 80 and any(p in query_lower for p in ["what is", "what's", "how much", "how many"]):
-        min_length = min(min_length, 30)
-    
-    if len(response_text.strip()) < min_length:
-        return False, 0.3, f"too_short:{len(response_text)}<{min_length}"
-    
-    # Check 3: Code block presence when code is requested
+    # Check 2: Code block presence when code is requested
     # Only require code blocks when the user's actual ask is for code, not when pasted context
     # mentions "code". Short factual questions ("what is 4+2") should not require code blocks.
     code_keywords = ["code", "function", "implement", "write", "create", "build", "fix", "debug"]
@@ -115,11 +101,11 @@ def _heuristic_quality_check(response_text: str, query_text: str) -> Tuple[bool,
             if not any(q in response_lower for q in ["?", "question", "clarify", "which", "what do you mean"]):
                 return False, 0.4, "code_requested_but_no_blocks"
     
-    # Check 4: Repetition detection
+    # Check 3: Repetition detection
     if _has_excessive_repetition(response_text):
         return False, 0.2, "excessive_repetition"
     
-    # Check 5: Hallucination markers (model talking about itself incorrectly)
+    # Check 4: Hallucination markers (model talking about itself incorrectly)
     hallucination_markers = [
         "as an ai language model",
         "i was trained by",
@@ -132,12 +118,7 @@ def _heuristic_quality_check(response_text: str, query_text: str) -> Tuple[bool,
             # Not necessarily bad, but suspicious in a code context
             pass  # Don't fail, just note
     
-    # Check 6: Very short sentences might indicate confusion
-    sentences = [s.strip() for s in response_text.split('.') if s.strip()]
-    if sentences:
-        avg_sentence_length = sum(len(s) for s in sentences) / len(sentences)
-        if avg_sentence_length < 20 and len(sentences) > 3:
-            return False, 0.5, "very_short_sentences"
+    # No length-based failure: short correct answers are valid. Skip "very_short_sentences" check.
     
     # All checks passed - compute quality score
     score = 0.7  # Base score for passing
