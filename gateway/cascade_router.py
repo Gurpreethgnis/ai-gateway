@@ -18,7 +18,7 @@ from gateway.config import (
     LOCAL_LLM_DEFAULT_MODEL,
 )
 from gateway.logging_setup import log
-from gateway.smart_routing import route_request, RoutingDecision
+from gateway.smart_routing import route_request, RoutingDecision, get_user_intent_text
 from gateway.quality_check import check_response_quality, compute_quality_metadata
 
 
@@ -113,7 +113,9 @@ async def route_with_cascade(
         # Phase 3: Quality check
         # call_ollama() returns normalized shape with "text"; OpenAI shape uses "content"
         response_text = local_response.get("content") or local_response.get("text") or ""
-        query_text = _get_last_user_message_text(messages)
+        # Use intent (actual question) not full last message - avoids requiring code blocks when
+        # pasted context mentions "code" but the user only asked e.g. "what is 4+2"
+        query_text = get_user_intent_text(messages, max_chars=600) or _get_last_user_message_text(messages)
         
         passes, quality_score, fail_reason = check_response_quality(response_text, query_text)
         cascade_metadata["quality_score"] = quality_score

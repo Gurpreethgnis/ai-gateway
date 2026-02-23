@@ -89,12 +89,25 @@ def _heuristic_quality_check(response_text: str, query_text: str) -> Tuple[bool,
     if any(keyword in query_lower for keyword in ["code", "function", "implement", "write"]):
         min_length = max(min_length, 100)  # Code requests need substance
     
+    # Short factual questions ("what is 4+2") can have very short correct answers
+    if len(query_lower) < 80 and any(p in query_lower for p in ["what is", "what's", "how much", "how many"]):
+        min_length = min(min_length, 30)
+    
     if len(response_text.strip()) < min_length:
         return False, 0.3, f"too_short:{len(response_text)}<{min_length}"
     
     # Check 3: Code block presence when code is requested
+    # Only require code blocks when the user's actual ask is for code, not when pasted context
+    # mentions "code". Short factual questions ("what is 4+2") should not require code blocks.
     code_keywords = ["code", "function", "implement", "write", "create", "build", "fix", "debug"]
-    if any(keyword in query_lower for keyword in code_keywords):
+    query_asks_for_code = any(keyword in query_lower for keyword in code_keywords)
+    # Skip code-block requirement for short simple questions (e.g. "what is 4+2", "explain X")
+    simple_factual = (
+        len(query_lower) < 120
+        and any(p in query_lower for p in ["what is", "what's", "how much", "why is", "explain "])
+        and not any(k in query_lower for k in ["code", "implement", "function", "write ", "build ", "fix ", "debug "])
+    )
+    if query_asks_for_code and not simple_factual:
         # If code was requested, response should have code blocks
         code_block_count = response_text.count("```")
         if code_block_count < 2:  # Should have at least opening and closing
