@@ -712,11 +712,44 @@ async def openai_chat_completions(req: Request):
                             cascade_metadata, latency_ms, success=True
                         )
                     
+                    local_model_id = local_response.get("model") or LOCAL_LLM_DEFAULT_MODEL
+                    if isinstance(local_model_id, str) and local_model_id.startswith("local:"):
+                        local_model_id = local_model_id.replace("local:", "", 1)
+                    
+                    # If client requested streaming, return SSE so Cursor/IDE gets expected format
+                    if parsed.get("stream", False):
+                        chunk_id = f"chatcmpl-{hashlib.sha1((ray + str(time.time())).encode()).hexdigest()[:16]}"
+                        created = int(time.time())
+                        async def _local_sse():
+                            # Content delta chunk(s) - send as one chunk so client sees the reply
+                            yield f"data: {json.dumps({
+                                'id': chunk_id,
+                                'object': 'chat.completion.chunk',
+                                'created': created,
+                                'model': with_model_prefix(local_model_id),
+                                'choices': [{'index': 0, 'delta': {'content': local_content}, 'finish_reason': None}],
+                            }, ensure_ascii=False)}\n\n"
+                            # Final chunk with finish_reason and usage
+                            yield f"data: {json.dumps({
+                                'id': chunk_id,
+                                'object': 'chat.completion.chunk',
+                                'created': created,
+                                'model': with_model_prefix(local_model_id),
+                                'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}],
+                                'usage': local_usage,
+                            }, ensure_ascii=False)}\n\n"
+                            yield "data: [DONE]\n\n"
+                        return StreamingResponse(
+                            _local_sse(),
+                            media_type="text/event-stream",
+                            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                        )
+                    
                     return {
                         "id": f"chatcmpl-local-{ray}",
                         "object": "chat.completion",
                         "created": int(time.time()),
-                        "model": LOCAL_LLM_DEFAULT_MODEL,
+                        "model": with_model_prefix(local_model_id),
                         "choices": [{
                             "index": 0,
                             "message": {
