@@ -7,6 +7,7 @@
 builder = "RAILPACK"
 
 [deploy]
+preDeployCommand = "python run_migration.py"
 startCommand = "python run_server.py"
 healthcheckPath = "/live"
 healthcheckTimeout = 300

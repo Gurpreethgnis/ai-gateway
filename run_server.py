@@ -18,14 +18,23 @@ if __name__ == "__main__":
         from app import app  # noqa: F401 - used to validate import
     except Exception:
         import traceback
-        print("FATAL: Failed to load app:", file=sys.stderr)
+        print("FATAL: Failed to load app:", file=sys.stderr, flush=True)
         traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
         sys.exit(1)
 
-    uvicorn.run(
-        "app:app",
-        host="0.0.0.0",
-        port=port,
-        workers=workers,
-        timeout_keep_alive=120,
-    )
+    print(f"Starting uvicorn on 0.0.0.0:{port}", file=sys.stderr, flush=True)
+    try:
+        uvicorn.run(
+            "app:app",
+            host="0.0.0.0",
+            port=port,
+            workers=workers,
+            timeout_keep_alive=120,
+        )
+    except Exception as e:
+        import traceback
+        print("FATAL: uvicorn failed:", file=sys.stderr, flush=True)
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+        sys.exit(1)
