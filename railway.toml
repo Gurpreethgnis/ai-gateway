@@ -8,7 +8,7 @@ builder = "RAILPACK"
 
 [deploy]
 preDeployCommand = "python run_migration.py"
-startCommand = "python run_server.py"
+startCommand = "sh -c 'echo Boot PORT=$PORT && exec python run_server.py'"
 healthcheckPath = "/live"
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"
