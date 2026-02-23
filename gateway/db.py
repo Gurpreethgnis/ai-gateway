@@ -257,6 +257,62 @@ async def create_tables():
              "nullable cache_creation_input_tokens"),
             ("ALTER TABLE usage_records ALTER COLUMN gateway_tokens_saved DROP NOT NULL",
              "nullable gateway_tokens_saved"),
+            # Auth and routing tables (migration 002)
+            ("""CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                email VARCHAR(255) UNIQUE NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
+                display_name VARCHAR(100),
+                role VARCHAR(20) DEFAULT 'user',
+                is_active BOOLEAN DEFAULT true,
+                created_at TIMESTAMP DEFAULT NOW(),
+                last_login TIMESTAMP
+            )""", "create users table"),
+            ("""CREATE TABLE IF NOT EXISTS sessions (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                token VARCHAR(255) UNIQUE NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW(),
+                ip_address VARCHAR(45),
+                user_agent TEXT
+            )""", "create sessions table"),
+            ("""CREATE TABLE IF NOT EXISTS model_settings (
+                id SERIAL PRIMARY KEY,
+                project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+                model_id VARCHAR(100) NOT NULL,
+                is_enabled BOOLEAN DEFAULT true,
+                custom_quality_rating FLOAT,
+                UNIQUE (project_id, model_id)
+            )""", "create model_settings table"),
+            ("ALTER TABLE projects ADD COLUMN IF NOT EXISTS cost_quality_bias FLOAT DEFAULT 0.3",
+             "add cost_quality_bias to projects"),
+            ("ALTER TABLE projects ADD COLUMN IF NOT EXISTS speed_quality_bias FLOAT DEFAULT 0.5",
+             "add speed_quality_bias to projects"),
+            ("ALTER TABLE projects ADD COLUMN IF NOT EXISTS cascade_enabled BOOLEAN DEFAULT true",
+             "add cascade_enabled to projects"),
+            ("ALTER TABLE projects ADD COLUMN IF NOT EXISTS max_cascade_attempts INTEGER DEFAULT 3",
+             "add max_cascade_attempts to projects"),
+            ("""CREATE TABLE IF NOT EXISTS ollama_pull_jobs (
+                id SERIAL PRIMARY KEY,
+                model_name VARCHAR(100) NOT NULL,
+                status VARCHAR(20) DEFAULT 'pending',
+                progress FLOAT,
+                error TEXT,
+                started_by INTEGER REFERENCES users(id),
+                created_at TIMESTAMP DEFAULT NOW(),
+                completed_at TIMESTAMP
+            )""", "create ollama_pull_jobs table"),
+            ("CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token)",
+             "index sessions token"),
+            ("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)",
+             "index sessions expires"),
+            ("CREATE INDEX IF NOT EXISTS idx_model_settings_project ON model_settings(project_id)",
+             "index model_settings project"),
+            # Default admin user (password: changeme)
+            ("""INSERT INTO users (email, password_hash, display_name, role)
+               VALUES ('admin@localhost', '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.CQE1fZHQ0u5eGa', 'Admin', 'admin')
+               ON CONFLICT (email) DO NOTHING""", "insert default admin user"),
         ]
         for sql, desc in migrations:
             await _safe_migrate(conn, sql, desc)
