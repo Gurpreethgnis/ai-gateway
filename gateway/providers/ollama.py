@@ -26,6 +26,22 @@ from gateway.config import (
 from gateway.logging_setup import log
 
 
+def _ollama_error_detail(status_code: int, response_text: str, model: str, preflight_ok: bool = True) -> str:
+    """Build a clear error message for Ollama upstream errors."""
+    if status_code == 404:
+        if preflight_ok:
+            return (
+                f"POST /api/chat returned 404 (GET /api/tags succeeded, so URL and CF Access are OK). "
+                f"Model '{model}' may not exist on the server - run 'ollama pull {model}' and ensure the name matches 'ollama list'. "
+                "Or your tunnel/proxy may not allow POST to /api/chat."
+            )
+        return (
+            f"Ollama returned 404 for model '{model}'. "
+            f"Run: ollama pull {model} and ensure LOCAL_LLM_BASE_URL and CF Access credentials in Railway match your working curl."
+        )
+    return f"Local LLM error (status={status_code}): {response_text}"
+
+
 class OllamaConfigError(Exception):
     """Raised when Ollama provider is misconfigured."""
     pass
@@ -84,6 +100,23 @@ def build_ollama_headers() -> Dict[str, str]:
         "CF-Access-Client-Secret": LOCAL_CF_ACCESS_CLIENT_SECRET,
         "Content-Type": "application/json",
     }
+
+
+async def _ollama_preflight(base_url: str, headers: Dict[str, str], timeout: float = 10.0) -> tuple[bool, str]:
+    """
+    GET /api/tags to verify Ollama base URL and CF Access work from this environment.
+    Returns (success, message). If False, message describes the failure.
+    """
+    url = f"{base_url.rstrip('/')}/api/tags"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(url, headers=headers)
+        if resp.status_code == 200:
+            return True, ""
+        body = (resp.text or resp.content.decode("utf-8", errors="replace"))[:200] or "(empty)"
+        return False, f"GET /api/tags returned {resp.status_code}: {body}"
+    except Exception as e:
+        return False, str(e)[:200]
 
 
 def build_ollama_payload(
@@ -230,12 +263,27 @@ async def call_ollama(
     validate_local_config()
     resolved_model = validate_local_model(model)
     
-    url = f"{LOCAL_LLM_BASE_URL.rstrip('/')}/api/chat"
+    base_url = LOCAL_LLM_BASE_URL.rstrip("/")
+    url = f"{base_url}/api/chat"
     headers = build_ollama_headers()
     payload = build_ollama_payload(resolved_model, messages, temperature, max_tokens)
     
+    # Preflight: verify base URL and CF Access work (GET /api/tags)
+    preflight_ok, preflight_msg = await _ollama_preflight(base_url, headers, timeout=8.0)
+    if not preflight_ok:
+        host = base_url.split("//", 1)[-1].split("/")[0] if "//" in base_url else base_url[:50]
+        log.error("OLLAMA PREFLIGHT FAILED host=%s msg=%s", host, preflight_msg)
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Ollama unreachable from gateway. GET /api/tags failed: " + preflight_msg + ". "
+                "Check LOCAL_LLM_BASE_URL and LOCAL_CF_ACCESS_CLIENT_ID / LOCAL_CF_ACCESS_CLIENT_SECRET in Railway match your curl; same host and CF Access headers."
+            )
+        )
+    
     t0 = time.time()
-    log.info("OLLAMA REQUEST model=%s messages=%d", resolved_model, len(messages))
+    host = base_url.split("//", 1)[-1].split("/")[0] if "//" in base_url else base_url[:40]
+    log.info("OLLAMA REQUEST host=%s model=%s messages=%d", host, resolved_model, len(messages))
     
     try:
         async with httpx.AsyncClient(timeout=LOCAL_LLM_TIMEOUT_SECONDS) as client:
@@ -258,15 +306,13 @@ async def call_ollama(
     elapsed_ms = int((time.time() - t0) * 1000)
     
     if resp.status_code >= 400:
-        response_text = resp.text[:500] if resp.text else "(empty)"
+        response_text = (resp.text or resp.content.decode("utf-8", errors="replace"))[:500] or "(empty)"
         log.error(
             "OLLAMA UPSTREAM ERROR model=%s status=%d ms=%d response=%s",
             resolved_model, resp.status_code, elapsed_ms, response_text
         )
-        raise HTTPException(
-            status_code=502,
-            detail=f"Local LLM error (status={resp.status_code}): {response_text}"
-        )
+        detail = _ollama_error_detail(resp.status_code, response_text, resolved_model, preflight_ok=True)
+        raise HTTPException(status_code=502, detail=detail)
     
     try:
         ollama_data = resp.json()
@@ -304,9 +350,18 @@ async def call_ollama_openai_format(
     validate_local_config()
     resolved_model = validate_local_model(model)
     
-    url = f"{LOCAL_LLM_BASE_URL.rstrip('/')}/api/chat"
+    base_url = LOCAL_LLM_BASE_URL.rstrip("/")
+    url = f"{base_url}/api/chat"
     headers = build_ollama_headers()
     payload = build_ollama_payload(resolved_model, messages, temperature, max_tokens)
+    
+    preflight_ok, preflight_msg = await _ollama_preflight(base_url, headers, timeout=8.0)
+    if not preflight_ok:
+        log.error("OLLAMA PREFLIGHT FAILED (OpenAI) msg=%s", preflight_msg)
+        raise HTTPException(
+            status_code=502,
+            detail="Ollama unreachable from gateway. GET /api/tags failed: " + preflight_msg + ". Check LOCAL_LLM_BASE_URL and CF Access credentials in Railway."
+        )
     
     t0 = time.time()
     log.info("OLLAMA REQUEST (OpenAI) model=%s messages=%d", resolved_model, len(messages))
@@ -332,15 +387,13 @@ async def call_ollama_openai_format(
     elapsed_ms = int((time.time() - t0) * 1000)
     
     if resp.status_code >= 400:
-        response_text = resp.text[:500] if resp.text else "(empty)"
+        response_text = (resp.text or resp.content.decode("utf-8", errors="replace"))[:500] or "(empty)"
         log.error(
             "OLLAMA UPSTREAM ERROR (OpenAI) model=%s status=%d ms=%d response=%s",
             resolved_model, resp.status_code, elapsed_ms, response_text
         )
-        raise HTTPException(
-            status_code=502,
-            detail=f"Local LLM error (status={resp.status_code}): {response_text}"
-        )
+        detail = _ollama_error_detail(resp.status_code, response_text, resolved_model, preflight_ok=True)
+        raise HTTPException(status_code=502, detail=detail)
     
     try:
         ollama_data = resp.json()
