@@ -135,3 +135,46 @@ LOCAL_LLM_MODEL_ALLOWLIST = [
     "deepseek-coder:6.7b",
     "deepseek-coder-v2:16b",
 ]
+
+# =============================================================================
+# Multi-Provider API Keys (NEW)
+# =============================================================================
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+# Ollama URL (alternative to LOCAL_LLM_BASE_URL)
+OLLAMA_URL = os.getenv("OLLAMA_URL", LOCAL_LLM_BASE_URL)
+
+# =============================================================================
+# Preference-Based Routing (NEW - Replaces old routing config)
+# =============================================================================
+# Default routing preferences (0.0 to 1.0)
+# 0.0 = optimize for cost/speed, 1.0 = optimize for quality
+DEFAULT_COST_QUALITY_BIAS = float(os.getenv("DEFAULT_COST_QUALITY_BIAS", "0.5"))
+DEFAULT_SPEED_QUALITY_BIAS = float(os.getenv("DEFAULT_SPEED_QUALITY_BIAS", "0.5"))
+DEFAULT_CASCADE_ENABLED = os.getenv("DEFAULT_CASCADE_ENABLED", "1") == "1"
+DEFAULT_MAX_CASCADE_ATTEMPTS = int(os.getenv("DEFAULT_MAX_CASCADE_ATTEMPTS", "2"))
+
+# =============================================================================
+# Response Caching (NEW)
+# =============================================================================
+ENABLE_RESPONSE_CACHE = os.getenv("ENABLE_RESPONSE_CACHE", "1") == "1"
+RESPONSE_CACHE_TTL = int(os.getenv("RESPONSE_CACHE_TTL", "1800"))  # 30 minutes
+
+# =============================================================================
+# Context Compression (NEW)
+# =============================================================================
+ENABLE_CONTEXT_COMPRESSION = os.getenv("ENABLE_CONTEXT_COMPRESSION", "1") == "1"
+COMPRESSION_MODEL = os.getenv("COMPRESSION_MODEL", "ollama/llama3.1:8b")
+
+# =============================================================================
+# Authentication (NEW)
+# =============================================================================
+# Enable dashboard authentication
+ENABLE_DASHBOARD_AUTH = os.getenv("ENABLE_DASHBOARD_AUTH", "0") == "1"
+# Secret key for session tokens (auto-generated if not set)
+SESSION_SECRET_KEY = os.getenv("SESSION_SECRET_KEY", GATEWAY_API_KEY)
+SESSION_EXPIRY_HOURS = int(os.getenv("SESSION_EXPIRY_HOURS", "24"))
+# Allow public registration
+ALLOW_REGISTRATION = os.getenv("ALLOW_REGISTRATION", "0") == "1"

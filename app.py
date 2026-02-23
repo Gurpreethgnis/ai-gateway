@@ -21,6 +21,8 @@ from gateway.routers.chat import router as chat_router
 from gateway.routers.openai import router as openai_router
 from gateway.routers.admin import router as admin_router
 from gateway.routers.dashboard import router as dashboard_router
+from gateway.routers.auth import router as auth_router
+from gateway.routers.dashboard_api import router as dashboard_api_router
 
 setup_logging()
 
@@ -44,6 +46,24 @@ async def lifespan(app: FastAPI):
         init_db()  # Creates engine config (instant, no connection)
         app.state.db_init_task = asyncio.create_task(background_db_init())
         log.info("Database initialization started in background")
+    
+    # Initialize model registry
+    try:
+        from gateway.model_registry import get_model_registry
+        registry = get_model_registry()
+        await registry.initialize()
+        log.info("Model registry initialized with %d models", len(registry.get_all_models()))
+    except Exception as e:
+        log.warning("Could not initialize model registry: %r", e)
+    
+    # Initialize provider registry
+    try:
+        from gateway.providers.registry import get_provider_registry
+        provider_registry = get_provider_registry()
+        providers = provider_registry.get_available_providers()
+        log.info("Provider registry initialized: %s", list(providers.keys()))
+    except Exception as e:
+        log.warning("Could not initialize provider registry: %r", e)
     
     yield
 
@@ -70,6 +90,8 @@ app.include_router(chat_router)
 app.include_router(openai_router)
 app.include_router(admin_router)
 app.include_router(dashboard_router)
+app.include_router(auth_router)
+app.include_router(dashboard_api_router)
 
 if ENABLE_BATCH_API:
     from gateway.batch import router as batch_router

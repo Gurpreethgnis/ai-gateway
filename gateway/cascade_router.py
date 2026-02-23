@@ -1,12 +1,12 @@
 """
-Cascade routing: try local first, escalate to Claude if quality is insufficient.
+Cascade routing: try local first, escalate to cloud if quality is insufficient.
 
 This implements the FrugalGPT-style cascade pattern:
-1. Route request (Phase 1 heuristics + Phase 2 LLM classifier)
-2. If tier is "local", try local Ollama
+1. Get routing decision from routing_engine (preference-based scoring)
+2. If provider is "ollama", try local first
 3. Check response quality
 4. If quality passes, return local response
-5. If quality fails, escalate to Claude (Sonnet/Opus)
+5. If quality fails, get next best model from routing_engine
 """
 
 import time
@@ -18,8 +18,6 @@ from gateway.config import (
     LOCAL_LLM_DEFAULT_MODEL,
 )
 from gateway.logging_setup import log
-from gateway.smart_routing import route_request, RoutingDecision, get_user_intent_text
-from gateway.quality_check import check_response_quality, compute_quality_metadata
 
 
 async def route_with_cascade(
@@ -28,12 +26,13 @@ async def route_with_cascade(
     project_id: Optional[int],
     system_prompt: str,
     explicit_model: Optional[str] = None,
-) -> Tuple[RoutingDecision, Optional[Dict[str, Any]], Optional[str]]:
+    cost_quality_bias: Optional[float] = None,
+    speed_quality_bias: Optional[float] = None,
+) -> Tuple[Any, Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """
-    Route with cascade: try local first, escalate if quality check fails.
+    Route with cascade: try preferred model first, escalate if quality check fails.
     
-    FrugalGPT-style cascade: try cheap model first even when routing suggests expensive.
-    Only skip cascade for explicitly forced tiers (user typed "opus", skill forced it).
+    Uses the new preference-based routing engine for model selection.
     
     Args:
         messages: Conversation messages
@@ -41,31 +40,46 @@ async def route_with_cascade(
         project_id: Optional project ID
         system_prompt: System prompt text
         explicit_model: Explicit model request (if any)
+        cost_quality_bias: Optional override (0=cheapest, 1=highest quality)
+        speed_quality_bias: Optional override (0=fastest, 1=highest quality)
     
     Returns:
         (decision, local_response, cascade_metadata) where:
-        - decision: Final routing decision (may differ from initial)
+        - decision: Final routing decision (RoutingDecision from routing_engine)
         - local_response: Local model response if tried and passed, None otherwise
         - cascade_metadata: Dict with cascade info for logging
     """
-    if not ENABLE_CASCADE_ROUTING:
-        # Cascade disabled, use standard routing
-        decision = await route_request(messages, tools, project_id, explicit_model, system_prompt)
-        return decision, None, {"cascade_enabled": False}
+    from gateway.routing_engine import get_routing_decision_async
     
-    from gateway.config import CASCADE_ELIGIBLE_TIERS
-    from gateway.smart_routing import is_simple_question_last_message
+    if not ENABLE_CASCADE_ROUTING:
+        # Cascade disabled, use standard routing directly
+        decision = await get_routing_decision_async(
+            messages=messages,
+            tools=tools,
+            system_prompt=system_prompt,
+            explicit_model=explicit_model,
+            cost_quality_bias=cost_quality_bias,
+            speed_quality_bias=speed_quality_bias,
+        )
+        return decision, None, {"cascade_enabled": False}
     
     t0 = time.time()
     
-    # Phase 1: Initial routing decision
-    initial_decision = await route_request(messages, tools, project_id, explicit_model, system_prompt)
+    # Phase 1: Get routing decision from new routing engine
+    initial_decision = await get_routing_decision_async(
+        messages=messages,
+        tools=tools,
+        system_prompt=system_prompt,
+        explicit_model=explicit_model,
+        cost_quality_bias=cost_quality_bias,
+        speed_quality_bias=speed_quality_bias,
+    )
     
     cascade_metadata = {
         "cascade_enabled": True,
-        "initial_tier": initial_decision.tier,
+        "initial_model": initial_decision.primary_model,
         "initial_provider": initial_decision.provider,
-        "initial_phase": initial_decision.phase,
+        "initial_score": initial_decision.scores.get(initial_decision.primary_model, 0),
         "escalated": False,
         "escalation_reason": None,
         "local_response_time_ms": None,
@@ -73,49 +87,46 @@ async def route_with_cascade(
         "total_cascade_time_ms": None,
     }
     
-    # Decide if we should try local first (cascade eligibility)
-    is_explicit = initial_decision.phase == "explicit"
-    tier_eligible = initial_decision.tier in CASCADE_ELIGIBLE_TIERS
-    is_simple = is_simple_question_last_message(messages)
-    
-    # Try local if: (tier is eligible AND simple question) OR (tier is already local)
-    should_try_local = (tier_eligible and is_simple) or initial_decision.provider == "local"
-    
-    # Never cascade if explicitly forced (user typed "opus", skill forced it)
-    if is_explicit and initial_decision.provider != "local":
-        should_try_local = False
+    # If explicit model requested, skip cascade
+    if explicit_model and explicit_model == initial_decision.primary_model:
         cascade_metadata["total_cascade_time_ms"] = int((time.time() - t0) * 1000)
         return initial_decision, None, cascade_metadata
     
-    # If not eligible for cascade, pass through
-    if not should_try_local:
+    # Only cascade if initial decision is for local/Ollama
+    if initial_decision.provider != "ollama":
         cascade_metadata["total_cascade_time_ms"] = int((time.time() - t0) * 1000)
         return initial_decision, None, cascade_metadata
     
     # Phase 2: Try local model
-    log.info("Cascade: trying local model (tier=%s, phase=%s)", initial_decision.tier, initial_decision.phase)
+    log.info("Cascade: trying local model %s", initial_decision.primary_model)
     
     try:
         local_t0 = time.time()
-        local_response = await _call_local_for_cascade(messages, system_prompt)
+        local_response = await _call_local_for_cascade(
+            messages, system_prompt, initial_decision.primary_model
+        )
         local_time_ms = int((time.time() - local_t0) * 1000)
         cascade_metadata["local_response_time_ms"] = local_time_ms
         
         if not local_response or "error" in local_response:
-            # Local call failed
-            log.warning("Cascade: local call failed, escalating to Claude")
-            escalated_decision = _escalate_decision(initial_decision, "local_call_failed")
+            # Local call failed, get next best model
+            log.warning("Cascade: local call failed, escalating")
+            escalated_decision = await _get_escalation_decision(
+                messages, tools, system_prompt, 
+                exclude_provider="ollama",
+                cost_quality_bias=cost_quality_bias,
+                speed_quality_bias=speed_quality_bias,
+            )
             cascade_metadata["escalated"] = True
             cascade_metadata["escalation_reason"] = "local_call_failed"
             cascade_metadata["total_cascade_time_ms"] = int((time.time() - t0) * 1000)
             return escalated_decision, None, cascade_metadata
         
         # Phase 3: Quality check
-        # call_ollama() returns normalized shape with "text"; OpenAI shape uses "content"
+        from gateway.quality_check import check_response_quality
+        
         response_text = local_response.get("content") or local_response.get("text") or ""
-        # Use intent (actual question) not full last message - avoids requiring code blocks when
-        # pasted context mentions "code" but the user only asked e.g. "what is 4+2"
-        query_text = get_user_intent_text(messages, max_chars=600) or _get_last_user_message_text(messages)
+        query_text = _get_last_user_message_text(messages)
         
         passes, quality_score, fail_reason = check_response_quality(response_text, query_text)
         cascade_metadata["quality_score"] = quality_score
@@ -123,18 +134,23 @@ async def route_with_cascade(
         if passes:
             # Quality passed, return local response
             log.info(
-                "Cascade: local quality passed (score=%.2f, time=%dms), using local response",
+                "Cascade: local quality passed (score=%.2f, time=%dms)",
                 quality_score, local_time_ms
             )
             cascade_metadata["total_cascade_time_ms"] = int((time.time() - t0) * 1000)
             return initial_decision, local_response, cascade_metadata
         
-        # Quality failed, escalate to Claude
+        # Quality failed, escalate
         log.info(
-            "Cascade: local quality failed (score=%.2f, reason=%s), escalating to Claude",
+            "Cascade: local quality failed (score=%.2f, reason=%s), escalating",
             quality_score, fail_reason
         )
-        escalated_decision = _escalate_decision(initial_decision, fail_reason or "quality_check_failed")
+        escalated_decision = await _get_escalation_decision(
+            messages, tools, system_prompt,
+            exclude_provider="ollama",
+            cost_quality_bias=cost_quality_bias,
+            speed_quality_bias=speed_quality_bias,
+        )
         cascade_metadata["escalated"] = True
         cascade_metadata["escalation_reason"] = fail_reason or "quality_check_failed"
         cascade_metadata["total_cascade_time_ms"] = int((time.time() - t0) * 1000)
@@ -143,17 +159,48 @@ async def route_with_cascade(
     
     except Exception as e:
         # Exception during cascade, escalate
-        log.exception("Cascade: exception during local attempt, escalating: %r", e)
-        escalated_decision = _escalate_decision(initial_decision, f"exception:{str(e)[:30]}")
+        log.exception("Cascade: exception during local attempt: %r", e)
+        escalated_decision = await _get_escalation_decision(
+            messages, tools, system_prompt,
+            exclude_provider="ollama",
+            cost_quality_bias=cost_quality_bias,
+            speed_quality_bias=speed_quality_bias,
+        )
         cascade_metadata["escalated"] = True
         cascade_metadata["escalation_reason"] = f"exception:{str(e)[:30]}"
         cascade_metadata["total_cascade_time_ms"] = int((time.time() - t0) * 1000)
         return escalated_decision, None, cascade_metadata
 
 
+async def _get_escalation_decision(
+    messages: List[Dict[str, Any]],
+    tools: List[Dict[str, Any]],
+    system_prompt: str,
+    exclude_provider: str,
+    cost_quality_bias: Optional[float] = None,
+    speed_quality_bias: Optional[float] = None,
+):
+    """
+    Get the next best model, excluding the specified provider.
+    """
+    from gateway.routing_engine import get_routing_decision_async
+    
+    # Re-run routing with excluded provider
+    return await get_routing_decision_async(
+        messages=messages,
+        tools=tools,
+        system_prompt=system_prompt,
+        explicit_model=None,
+        cost_quality_bias=cost_quality_bias,
+        speed_quality_bias=speed_quality_bias,
+        exclude_providers=[exclude_provider],
+    )
+
+
 async def _call_local_for_cascade(
     messages: List[Dict[str, Any]],
     system_prompt: str,
+    model: str,
 ) -> Optional[Dict[str, Any]]:
     """
     Call local Ollama for cascade attempt with context truncation.
@@ -167,28 +214,29 @@ async def _call_local_for_cascade(
     Args:
         messages: Conversation messages
         system_prompt: System prompt
+        model: Local model to use
     
     Returns:
         Local response dict with "content" key, or None on error
     """
     try:
-        from gateway.providers.ollama import call_ollama
+        from gateway.providers.ollama_provider import OllamaProvider
         from gateway.config import LOCAL_CONTEXT_CHAR_LIMIT
         
-        # Truncate system prompt (keep first 2000 chars, strips Cursor boilerplate)
+        # Truncate system prompt (keep first 2000 chars)
         truncated_system = system_prompt[:2000] if system_prompt else ""
         
-        # Keep only last 8 messages (or fewer if total chars exceeds limit)
+        # Keep only last 8 messages
         recent_messages = messages[-8:] if len(messages) > 8 else messages
         
-        # Convert messages to Ollama format, stripping tool blocks
-        ollama_messages = []
+        # Convert messages, stripping tool blocks
+        processed_messages = []
         if truncated_system:
-            ollama_messages.append({"role": "system", "content": truncated_system})
+            processed_messages.append({"role": "system", "content": truncated_system})
         
         total_chars = len(truncated_system)
         
-        for msg in reversed(recent_messages):
+        for msg in recent_messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             
@@ -198,7 +246,6 @@ async def _call_local_for_cascade(
                 for block in content:
                     if isinstance(block, dict):
                         block_type = block.get("type")
-                        # Skip tool_result and tool_use blocks (local model can't use them)
                         if block_type in ("tool_result", "tool_use"):
                             continue
                         if block_type == "text":
@@ -207,80 +254,37 @@ async def _call_local_for_cascade(
                         text_parts.append(block)
                 content = " ".join(text_parts)
             
-            # Skip empty messages
             if not content or not content.strip():
                 continue
             
-            # Check if adding this message would exceed limit
             if total_chars + len(content) > LOCAL_CONTEXT_CHAR_LIMIT:
-                break
+                # Truncate to fit
+                remaining = LOCAL_CONTEXT_CHAR_LIMIT - total_chars
+                if remaining > 100:
+                    content = content[:remaining]
+                else:
+                    break
             
-            ollama_messages.insert(1 if truncated_system else 0, {"role": role, "content": content})
+            processed_messages.append({"role": role, "content": content})
             total_chars += len(content)
         
-        # Ensure we have at least the last user message
-        if not any(m.get("role") == "user" for m in ollama_messages):
-            last_user = next((m for m in reversed(messages) if m.get("role") == "user"), None)
-            if last_user:
-                content = last_user.get("content", "")
-                if isinstance(content, list):
-                    text_parts = []
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            text_parts.append(block.get("text", ""))
-                    content = " ".join(text_parts)
-                # Truncate if too long
-                content = content[:LOCAL_CONTEXT_CHAR_LIMIT - len(truncated_system)]
-                ollama_messages.append({"role": "user", "content": content})
+        log.debug("Cascade: calling local with %d messages, %d chars", 
+                  len(processed_messages), total_chars)
         
-        log.debug("Cascade: calling local with %d messages, %d chars", len(ollama_messages), total_chars)
-        
-        # Call Ollama
-        response = await call_ollama(
-            messages=ollama_messages,
-            model=LOCAL_LLM_DEFAULT_MODEL,
+        # Call Ollama via provider
+        provider = OllamaProvider()
+        response = await provider.complete(
+            messages=processed_messages,
+            model=model or LOCAL_LLM_DEFAULT_MODEL,
             temperature=0.2,
             max_tokens=2000,
         )
         
-        return response
+        return {"content": response.content, "model": response.model}
     
     except Exception as e:
         log.exception("Error calling local for cascade: %r", e)
         return {"error": str(e)}
-
-
-def _escalate_decision(initial_decision: RoutingDecision, reason: str) -> RoutingDecision:
-    """
-    Create an escalated routing decision (local -> sonnet/opus).
-    
-    Args:
-        initial_decision: Original decision (tier=local)
-        reason: Reason for escalation
-    
-    Returns:
-        New routing decision targeting Claude
-    """
-    from gateway.config import DEFAULT_MODEL, OPUS_MODEL
-    
-    # Default to Sonnet for escalation
-    # TODO: Could use keyword/complexity scoring here to decide sonnet vs opus
-    escalated_model = DEFAULT_MODEL
-    escalated_tier = "sonnet"
-    
-    # If initial decision had high complexity signals, escalate to Opus
-    if any(r in initial_decision.reasons for r in ["deep_reasoning", "many_files", "architecture"]):
-        escalated_model = OPUS_MODEL
-        escalated_tier = "opus"
-    
-    return RoutingDecision(
-        provider="anthropic",
-        model=escalated_model,
-        tier=escalated_tier,
-        score=initial_decision.score,
-        reasons=initial_decision.reasons + [f"escalated:{reason}"],
-        phase="escalated_from_local",
-    )
 
 
 def _get_last_user_message_text(messages: List[Dict[str, Any]]) -> str:

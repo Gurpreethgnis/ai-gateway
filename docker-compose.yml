@@ -1,0 +1,166 @@
+# AI Gateway - Docker Compose Configuration
+# 
+# Usage:
+#   docker-compose up -d          # Start all services
+#   docker-compose logs -f        # Follow logs
+#   docker-compose down           # Stop all services
+#
+# Services:
+#   - gateway:  Main AI Gateway API (port 8000)
+#   - postgres: PostgreSQL database (port 5432)
+#   - redis:    Redis cache (port 6379)
+#   - ollama:   Local LLM inference (port 11434)
+
+version: '3.8'
+
+services:
+  # ==========================================================================
+  # AI Gateway - Main Application
+  # ==========================================================================
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-gateway
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      # Database
+      - DATABASE_URL=postgresql+asyncpg://gateway:gateway@postgres:5432/gateway
+      
+      # Redis
+      - REDIS_URL=redis://redis:6379/0
+      
+      # Ollama (internal Docker network)
+      - OLLAMA_URL=http://ollama:11434
+      
+      # Provider API Keys (pass from host environment or .env file)
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      
+      # Routing Defaults
+      - DEFAULT_COST_QUALITY_BIAS=${DEFAULT_COST_QUALITY_BIAS:-0.3}
+      - DEFAULT_SPEED_QUALITY_BIAS=${DEFAULT_SPEED_QUALITY_BIAS:-0.5}
+      - DEFAULT_CASCADE_ENABLED=${DEFAULT_CASCADE_ENABLED:-true}
+      
+      # Auth
+      - ENABLE_DASHBOARD_AUTH=${ENABLE_DASHBOARD_AUTH:-true}
+      - SESSION_SECRET_KEY=${SESSION_SECRET_KEY:-change-me-in-production}
+      - ALLOW_REGISTRATION=${ALLOW_REGISTRATION:-false}
+      
+      # Features
+      - ENABLE_RESPONSE_CACHE=${ENABLE_RESPONSE_CACHE:-true}
+      - ENABLE_CONTEXT_COMPRESSION=${ENABLE_CONTEXT_COMPRESSION:-true}
+      - COMPRESSION_MODEL=${COMPRESSION_MODEL:-llama3.2:3b}
+      
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    volumes:
+      # Optional: Mount for hot-reload in development
+      # - ./gateway:/app/gateway:ro
+      - gateway-logs:/app/logs
+
+  # ==========================================================================
+  # PostgreSQL Database
+  # ==========================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: ai-gateway-postgres
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+      POSTGRES_DB: gateway
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Initialize with migrations
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Redis Cache
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: ai-gateway-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Ollama - Local LLM Inference
+  # ==========================================================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ai-gateway-ollama
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    environment:
+      # GPU support (uncomment for NVIDIA GPUs)
+      # - NVIDIA_VISIBLE_DEVICES=all
+      
+      # Memory limits (adjust based on your hardware)
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-2}
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-2}
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+  ollama-data:
+    driver: local
+  gateway-logs:
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  default:
+    name: ai-gateway-network
+    driver: bridge

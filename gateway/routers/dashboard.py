@@ -157,6 +157,65 @@ DASHBOARD_HTML = """
             </div>
         </div>
 
+        <!-- Routing Preferences Section -->
+        <div id="routing-prefs" class="card" style="margin-bottom: 2rem; padding: 1.5rem;">
+            <h2 style="font-size: 1.25rem; margin-bottom: 1rem;">Routing Preferences</h2>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem;">
+                <div>
+                    <label class="card-label">Cost ↔ Quality Trade-off</label>
+                    <input type="range" id="cost-quality" min="0" max="100" value="30" 
+                           style="width: 100%; accent-color: var(--primary);">
+                    <div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-dim);">
+                        <span>💰 Cheapest</span>
+                        <span id="cost-quality-val">30%</span>
+                        <span>⭐ Best Quality</span>
+                    </div>
+                </div>
+                <div>
+                    <label class="card-label">Speed ↔ Quality Trade-off</label>
+                    <input type="range" id="speed-quality" min="0" max="100" value="50"
+                           style="width: 100%; accent-color: var(--primary);">
+                    <div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-dim);">
+                        <span>⚡ Fastest</span>
+                        <span id="speed-quality-val">50%</span>
+                        <span>⭐ Best Quality</span>
+                    </div>
+                </div>
+            </div>
+            <div style="margin-top: 1.5rem; display: flex; align-items: center; gap: 1rem;">
+                <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                    <input type="checkbox" id="cascade-enabled" checked style="accent-color: var(--primary);">
+                    <span style="font-size: 0.875rem;">Enable automatic fallback (cascade)</span>
+                </label>
+                <button onclick="savePreferences()" class="refresh-btn">Save Preferences</button>
+            </div>
+        </div>
+        <script>
+            document.getElementById('cost-quality').addEventListener('input', function() {
+                document.getElementById('cost-quality-val').textContent = this.value + '%';
+            });
+            document.getElementById('speed-quality').addEventListener('input', function() {
+                document.getElementById('speed-quality-val').textContent = this.value + '%';
+            });
+            async function savePreferences() {
+                const prefs = {
+                    cost_quality_bias: document.getElementById('cost-quality').value / 100,
+                    speed_quality_bias: document.getElementById('speed-quality').value / 100,
+                    cascade_enabled: document.getElementById('cascade-enabled').checked,
+                    max_cascade_attempts: 3
+                };
+                try {
+                    const resp = await fetch('/api/preferences', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(prefs)
+                    });
+                    if (resp.ok) alert('Preferences saved!');
+                    else alert('Failed to save preferences');
+                } catch (e) { alert('Error: ' + e.message); }
+            }
+        </script>
+
         <h2 style="margin-bottom: 1.5rem; font-size: 1.25rem;">Token Savings Breakdown</h2>
         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem;">
             <div class="card" style="border-left: 4px solid #10b981;">
