@@ -59,5 +59,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # Expose port
 EXPOSE ${PORT}
 
-# Run with gunicorn for production
-CMD ["gunicorn", "app:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "120"]
+# Run with gunicorn for production (shell form so $PORT is expanded)
+CMD sh -c "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000} --workers 4 --timeout-keep-alive 120"
