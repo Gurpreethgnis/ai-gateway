@@ -71,49 +71,33 @@ def map_model_alias(maybe: Optional[str]) -> Optional[str]:
 
     return None
 
-MODEL_FALLBACKS = {
-    # Sonnet 4 chain
-    "claude-sonnet-4-0": [
-        "claude-3-5-sonnet-20241022",
-        "claude-3-5-haiku-20241022",
-    ],
-    # Sonnet 3.5 chain
-    "claude-3-5-sonnet-20241022": [
-        "claude-sonnet-4-0",
-        "claude-3-5-haiku-20241022",
-    ],
-    # Opus chain
-    "claude-opus-4-5": [
-        "claude-sonnet-4-0",
-        "claude-3-5-sonnet-20241022",
-    ],
-    "claude-3-opus-20240229": [
-        "claude-sonnet-4-0",
-        "claude-3-5-sonnet-20241022",
-    ],
-    # Haiku chain
-    "claude-3-5-haiku-20241022": [
-        "claude-3-5-sonnet-20241022",
-        "claude-sonnet-4-0",
-    ],
-    "claude-3-haiku-20240307": [
-        "claude-3-5-haiku-20241022",
-        "claude-3-5-sonnet-20241022",
-    ],
-}
+# Fallback chains use only DEFAULT_MODEL and OPUS_MODEL to avoid 404s from deprecated IDs.
+def _build_fallback_chains():
+    from gateway.config import DEFAULT_MODEL, OPUS_MODEL
+    return {
+        DEFAULT_MODEL: [OPUS_MODEL],
+        OPUS_MODEL: [DEFAULT_MODEL],
+    }
+
+
+def _get_fallback_chain():
+    if not hasattr(_get_fallback_chain, "_chain"):
+        _get_fallback_chain._chain = _build_fallback_chains()
+    return _get_fallback_chain._chain
+
 
 def get_fallback_model(current_model: str, attempt: int) -> str:
     """
     Returns the next model in the rotation for the given attempt index.
-    If no specific fallback is defined, returns Haiku as the ultimate baseline.
+    Uses only DEFAULT_MODEL and OPUS_MODEL from config to avoid deprecated IDs (404).
     """
+    if attempt <= 0:
+        return current_model
     base = strip_model_prefix(current_model) or ""
-    chain = MODEL_FALLBACKS.get(base, [])
-    
+    chain = _get_fallback_chain().get(base, [])
     if not chain:
-        return "claude-3-5-haiku-20241022" if attempt > 0 else current_model
-
-    # Use modulo to cycle through the chain if multiple retries happen
+        from gateway.config import DEFAULT_MODEL
+        return DEFAULT_MODEL
     fallback_idx = (attempt - 1) % len(chain)
     return chain[fallback_idx]
 

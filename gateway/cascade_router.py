@@ -111,7 +111,8 @@ async def route_with_cascade(
             return escalated_decision, None, cascade_metadata
         
         # Phase 3: Quality check
-        response_text = local_response.get("content", "")
+        # call_ollama() returns normalized shape with "text"; OpenAI shape uses "content"
+        response_text = local_response.get("content") or local_response.get("text") or ""
         query_text = _get_last_user_message_text(messages)
         
         passes, quality_score, fail_reason = check_response_quality(response_text, query_text)
