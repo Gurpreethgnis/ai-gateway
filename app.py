@@ -86,15 +86,15 @@ async def lifespan(app: FastAPI):
                 from gateway.model_registry import get_model_registry
                 registry = get_model_registry()
                 await registry.initialize()
-                log.info("Model registry initialized with %d models", len(registry.get_all_models()))
+                log.info("Model registry initialized with %d models", len(registry.get_enabled_models()))
             except Exception as e:
                 log.warning("Could not initialize model registry: %r", e)
             try:
                 from gateway.providers.registry import get_provider_registry
                 provider_registry = get_provider_registry()
                 await provider_registry.initialize()
-                providers = provider_registry.get_available_providers()
-                log.info("Provider registry initialized: %s", list(providers.keys()))
+                providers = provider_registry.list_providers()
+                log.info("Provider registry initialized: %s", providers)
             except Exception as e:
                 log.warning("Could not initialize provider registry: %r", e)
         asyncio.create_task(_init_registries())
