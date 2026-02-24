@@ -310,9 +310,10 @@ async def create_tables():
             ("CREATE INDEX IF NOT EXISTS idx_model_settings_project ON model_settings(project_id)",
              "index model_settings project"),
             # Default admin user (password: changeme)
+            # Hash generated with: bcrypt.hashpw(b'changeme', bcrypt.gensalt()).decode()
             ("""INSERT INTO users (email, password_hash, display_name, role)
-               VALUES ('admin@localhost', '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.CQE1fZHQ0u5eGa', 'Admin', 'admin')
-               ON CONFLICT (email) DO NOTHING""", "insert default admin user"),
+               VALUES ('admin@localhost', '$2b$12$cdJGP8y3X1Cs76DDxZ1mbO15XgSsjLZ7B4Bn25zm1w28fsACOVVRK', 'Admin', 'admin')
+               ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash""", "insert default admin user"),
         ]
         for sql, desc in migrations:
             await _safe_migrate(conn, sql, desc)
