@@ -1,12 +1,25 @@
-from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Request, Depends
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from gateway.db import get_session, UsageRecord
+from gateway import config
+from gateway.routers.auth import get_current_user
 import logging
 from datetime import datetime, timedelta
 
 router = APIRouter()
 log = logging.getLogger("gateway")
+
+
+async def require_dashboard_auth(request: Request):
+    """Check dashboard authentication if enabled."""
+    if not config.ENABLE_DASHBOARD_AUTH:
+        return None
+    
+    user = await get_current_user(request)
+    if not user:
+        return None
+    return user
 
 DASHBOARD_HTML = """
 <!DOCTYPE html>
@@ -120,6 +133,18 @@ DASHBOARD_HTML = """
             transition: opacity 0.2s;
         }
         .refresh-btn:hover { opacity: 0.9; }
+        .logout-btn {
+            background: transparent;
+            color: var(--text-dim);
+            border: 1px solid var(--border);
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            font-size: 0.875rem;
+            cursor: pointer;
+            margin-left: 0.5rem;
+            transition: all 0.2s;
+        }
+        .logout-btn:hover { border-color: var(--primary); color: var(--text); }
     </style>
 </head>
 <body>
@@ -129,8 +154,9 @@ DASHBOARD_HTML = """
                 <h1>AI Gateway Insights</h1>
                 <p style="color: var(--text-dim)">{{VIEW_LABEL}}</p>
             </div>
-            <div>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
                 {{MODE_BUTTONS}}
+                {{USER_INFO}}
             </div>
         </header>
 
@@ -260,6 +286,326 @@ DASHBOARD_HTML = """
                 </tbody>
             </table>
         </div>
+
+        <!-- Model Manager Section -->
+        <div id="model-manager" class="card" style="margin-top: 2rem; padding: 1.5rem;">
+            <h2 style="font-size: 1.25rem; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+                <span>🤖</span> Model Manager
+            </h2>
+            <p style="color: var(--text-dim); margin-bottom: 1rem; font-size: 0.875rem;">
+                Enable or disable models for routing. Disabled models won't be selected by the smart router.
+            </p>
+            <div id="model-list" style="display: grid; gap: 0.75rem;">
+                <div style="text-align: center; color: var(--text-dim); padding: 2rem;">Loading models...</div>
+            </div>
+        </div>
+
+        <!-- Ollama Controls Section -->
+        <div id="ollama-controls" class="card" style="margin-top: 2rem; padding: 1.5rem;">
+            <h2 style="font-size: 1.25rem; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+                <span>🦙</span> Ollama Controls
+            </h2>
+            <p style="color: var(--text-dim); margin-bottom: 1rem; font-size: 0.875rem;">
+                Manage local Ollama models. Pull new models or delete existing ones.
+            </p>
+            
+            <!-- Pull Model Form -->
+            <div style="display: flex; gap: 0.5rem; margin-bottom: 1.5rem;">
+                <input type="text" id="ollama-model-name" placeholder="e.g., llama3.2, codellama:7b, mistral"
+                       style="flex: 1; padding: 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 0.5rem; color: var(--text);">
+                <button onclick="pullOllamaModel()" class="refresh-btn">Pull Model</button>
+            </div>
+            
+            <!-- Progress Bar -->
+            <div id="ollama-progress" style="display: none; margin-bottom: 1rem;">
+                <div style="display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-dim); margin-bottom: 0.25rem;">
+                    <span id="ollama-progress-text">Downloading...</span>
+                    <span id="ollama-progress-pct">0%</span>
+                </div>
+                <div style="background: var(--bg); border-radius: 0.5rem; height: 8px; overflow: hidden;">
+                    <div id="ollama-progress-bar" style="background: var(--primary); height: 100%; width: 0%; transition: width 0.3s;"></div>
+                </div>
+            </div>
+            
+            <!-- Local Models List -->
+            <h3 style="font-size: 1rem; margin-bottom: 0.75rem; color: var(--text-dim);">Local Models</h3>
+            <div id="ollama-models" style="display: grid; gap: 0.5rem;">
+                <div style="text-align: center; color: var(--text-dim); padding: 1rem;">Loading Ollama models...</div>
+            </div>
+        </div>
+
+        <!-- Model Manager Script -->
+        <script>
+            // Logout function
+            async function logout() {
+                try {
+                    await fetch('/auth/logout', { method: 'POST' });
+                    window.location.href = '/auth/login';
+                } catch (e) {
+                    window.location.href = '/auth/login';
+                }
+            }
+            
+            // Load models on page load
+            document.addEventListener('DOMContentLoaded', function() {
+                loadModels();
+                loadOllamaModels();
+            });
+            
+            async function loadModels() {
+                const container = document.getElementById('model-list');
+                try {
+                    const resp = await fetch('/api/models');
+                    if (!resp.ok) {
+                        container.innerHTML = '<div style="color: var(--error);">Failed to load models. API returned: ' + resp.status + '</div>';
+                        return;
+                    }
+                    const models = await resp.json();
+                    
+                    if (!models || models.length === 0) {
+                        container.innerHTML = '<div style="color: var(--text-dim);">No models configured.</div>';
+                        return;
+                    }
+                    
+                    // Group by provider
+                    const byProvider = {};
+                    models.forEach(m => {
+                        if (!byProvider[m.provider]) byProvider[m.provider] = [];
+                        byProvider[m.provider].push(m);
+                    });
+                    
+                    let html = '';
+                    for (const [provider, providerModels] of Object.entries(byProvider)) {
+                        html += `<div style="margin-bottom: 1rem;">
+                            <div style="font-weight: 600; color: var(--primary); margin-bottom: 0.5rem; text-transform: capitalize;">${provider}</div>`;
+                        providerModels.forEach(m => {
+                            const checked = m.is_enabled ? 'checked' : '';
+                            const cost = m.cost_per_1k_input ? `$${m.cost_per_1k_input.toFixed(4)}/1K` : 'Free';
+                            html += `
+                            <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.75rem; background: var(--bg); border-radius: 0.5rem; margin-bottom: 0.25rem;">
+                                <div style="display: flex; align-items: center; gap: 0.75rem;">
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" ${checked} onchange="toggleModel('${m.id}', this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                    <div>
+                                        <div style="font-weight: 500; font-size: 0.875rem;">${m.display_name || m.id}</div>
+                                        <div style="font-size: 0.75rem; color: var(--text-dim);">Quality: ${(m.quality_rating * 100).toFixed(0)}% | ${cost}</div>
+                                    </div>
+                                </div>
+                            </div>`;
+                        });
+                        html += '</div>';
+                    }
+                    container.innerHTML = html;
+                } catch (e) {
+                    container.innerHTML = '<div style="color: var(--error);">Error loading models: ' + e.message + '</div>';
+                }
+            }
+            
+            async function toggleModel(modelId, enabled) {
+                try {
+                    const resp = await fetch(`/api/models/${encodeURIComponent(modelId)}/enabled`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ is_enabled: enabled })
+                    });
+                    if (!resp.ok) {
+                        alert('Failed to update model');
+                        loadModels(); // Reload to reset state
+                    }
+                } catch (e) {
+                    alert('Error: ' + e.message);
+                    loadModels();
+                }
+            }
+            
+            async function loadOllamaModels() {
+                const container = document.getElementById('ollama-models');
+                try {
+                    const resp = await fetch('/api/ollama/models');
+                    if (!resp.ok) {
+                        if (resp.status === 503) {
+                            container.innerHTML = '<div style="color: var(--text-dim);">Ollama not available. Start Ollama to manage local models.</div>';
+                        } else {
+                            container.innerHTML = '<div style="color: var(--error);">Failed to load Ollama models.</div>';
+                        }
+                        return;
+                    }
+                    const data = await resp.json();
+                    const models = data.models || [];
+                    
+                    if (models.length === 0) {
+                        container.innerHTML = '<div style="color: var(--text-dim);">No local Ollama models. Pull a model to get started.</div>';
+                        return;
+                    }
+                    
+                    let html = '';
+                    models.forEach(m => {
+                        const size = m.size ? `${(m.size / 1e9).toFixed(1)} GB` : 'Unknown';
+                        html += `
+                        <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.75rem; background: var(--bg); border-radius: 0.5rem;">
+                            <div>
+                                <div style="font-weight: 500; font-size: 0.875rem;">${m.name}</div>
+                                <div style="font-size: 0.75rem; color: var(--text-dim);">Size: ${size}</div>
+                            </div>
+                            <button onclick="deleteOllamaModel('${m.name}')" style="background: rgba(239, 68, 68, 0.2); color: #ef4444; border: none; padding: 0.375rem 0.75rem; border-radius: 0.375rem; font-size: 0.75rem; cursor: pointer;">
+                                Delete
+                            </button>
+                        </div>`;
+                    });
+                    container.innerHTML = html;
+                } catch (e) {
+                    container.innerHTML = '<div style="color: var(--text-dim);">Ollama not available.</div>';
+                }
+            }
+            
+            let pullInProgress = false;
+            
+            async function pullOllamaModel() {
+                if (pullInProgress) return;
+                
+                const input = document.getElementById('ollama-model-name');
+                const modelName = input.value.trim();
+                if (!modelName) {
+                    alert('Please enter a model name');
+                    return;
+                }
+                
+                pullInProgress = true;
+                const progress = document.getElementById('ollama-progress');
+                const progressBar = document.getElementById('ollama-progress-bar');
+                const progressText = document.getElementById('ollama-progress-text');
+                const progressPct = document.getElementById('ollama-progress-pct');
+                
+                progress.style.display = 'block';
+                progressText.textContent = 'Starting download...';
+                progressPct.textContent = '0%';
+                progressBar.style.width = '0%';
+                
+                try {
+                    const resp = await fetch('/api/ollama/pull', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ model_name: modelName })
+                    });
+                    
+                    if (resp.ok) {
+                        progressText.textContent = 'Pull started!';
+                        progressPct.textContent = '...';
+                        
+                        // Poll for progress
+                        let attempts = 0;
+                        const pollInterval = setInterval(async () => {
+                            attempts++;
+                            try {
+                                const statusResp = await fetch('/api/ollama/models');
+                                if (statusResp.ok) {
+                                    const data = await statusResp.json();
+                                    const found = (data.models || []).find(m => m.name.startsWith(modelName.split(':')[0]));
+                                    if (found) {
+                                        clearInterval(pollInterval);
+                                        progressText.textContent = 'Complete!';
+                                        progressPct.textContent = '100%';
+                                        progressBar.style.width = '100%';
+                                        setTimeout(() => {
+                                            progress.style.display = 'none';
+                                            input.value = '';
+                                            loadOllamaModels();
+                                        }, 1500);
+                                        pullInProgress = false;
+                                        return;
+                                    }
+                                }
+                            } catch (e) {}
+                            
+                            // Update progress animation
+                            const pct = Math.min(90, attempts * 5);
+                            progressBar.style.width = pct + '%';
+                            progressPct.textContent = pct + '%';
+                            progressText.textContent = 'Downloading ' + modelName + '...';
+                            
+                            if (attempts > 120) { // 2 min timeout
+                                clearInterval(pollInterval);
+                                progressText.textContent = 'Taking longer than expected...';
+                                pullInProgress = false;
+                            }
+                        }, 1000);
+                    } else {
+                        const err = await resp.json();
+                        progressText.textContent = 'Failed: ' + (err.detail || 'Unknown error');
+                        progressBar.style.width = '0%';
+                        progressBar.style.background = '#ef4444';
+                        pullInProgress = false;
+                    }
+                } catch (e) {
+                    progressText.textContent = 'Error: ' + e.message;
+                    pullInProgress = false;
+                }
+            }
+            
+            async function deleteOllamaModel(name) {
+                if (!confirm(`Delete model "${name}"? This cannot be undone.`)) return;
+                
+                try {
+                    const resp = await fetch(`/api/ollama/models/${encodeURIComponent(name)}`, {
+                        method: 'DELETE'
+                    });
+                    if (resp.ok) {
+                        loadOllamaModels();
+                    } else {
+                        const err = await resp.json();
+                        alert('Failed to delete: ' + (err.detail || 'Unknown error'));
+                    }
+                } catch (e) {
+                    alert('Error: ' + e.message);
+                }
+            }
+        </script>
+        
+        <!-- Toggle Switch Styles -->
+        <style>
+            .toggle-switch {
+                position: relative;
+                display: inline-block;
+                width: 40px;
+                height: 22px;
+            }
+            .toggle-switch input {
+                opacity: 0;
+                width: 0;
+                height: 0;
+            }
+            .toggle-slider {
+                position: absolute;
+                cursor: pointer;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background-color: var(--border);
+                transition: 0.3s;
+                border-radius: 22px;
+            }
+            .toggle-slider:before {
+                position: absolute;
+                content: "";
+                height: 16px;
+                width: 16px;
+                left: 3px;
+                bottom: 3px;
+                background-color: var(--text);
+                transition: 0.3s;
+                border-radius: 50%;
+            }
+            .toggle-switch input:checked + .toggle-slider {
+                background-color: var(--success);
+            }
+            .toggle-switch input:checked + .toggle-slider:before {
+                transform: translateX(18px);
+            }
+            .error { color: #ef4444; }
+        </style>
     </div>
 </body>
 </html>
@@ -379,7 +725,7 @@ async def _get_recent_requests(limit: int = 20) -> list[dict]:
         return []
 
 
-def _render_dashboard(stats: dict, recent: list[dict], full: bool) -> str:
+def _render_dashboard(stats: dict, recent: list[dict], full: bool, user: dict = None) -> str:
     """Render dashboard HTML with stats and recent requests."""
     total_input = stats["input_tokens"]
     cached = stats["cached_tokens"]
@@ -408,6 +754,13 @@ def _render_dashboard(stats: dict, recent: list[dict], full: bool) -> str:
             '<button class="refresh-btn" onclick="window.location.reload()">Refresh</button>'
         )
     
+    # User info for header when auth is enabled
+    if user and config.ENABLE_DASHBOARD_AUTH:
+        user_email = user.get("email", "User")
+        user_info = f'<span style="color: var(--text-dim); font-size: 0.875rem;">{user_email}</span><button class="logout-btn" onclick="logout()">Logout</button>'
+    else:
+        user_info = ""
+    
     rows_html = ""
     for r in recent:
         badge = '<span class="badge badge-cached">CACHED</span>' if r["cache_read"] > 0 else '<span class="badge badge-miss">MISS</span>'
@@ -430,6 +783,7 @@ def _render_dashboard(stats: dict, recent: list[dict], full: bool) -> str:
     html = DASHBOARD_HTML
     html = html.replace("{{VIEW_LABEL}}", view_label)
     html = html.replace("{{MODE_BUTTONS}}", mode_buttons)
+    html = html.replace("{{USER_INFO}}", user_info)
     html = html.replace("{{TOTAL_INPUT}}", f"{total_input:,}")
     html = html.replace("{{TOTAL_CACHED}}", f"{cached:,}")
     html = html.replace("{{GATEWAY_SAVED}}", f"{gateway_saved:,}")
@@ -445,11 +799,18 @@ def _render_dashboard(stats: dict, recent: list[dict], full: bool) -> str:
 async def get_dashboard(request: Request, full: bool = False):
     from gateway.cache import rds
     
+    # Check auth if enabled
+    user = None
+    if config.ENABLE_DASHBOARD_AUTH:
+        user = await get_current_user(request)
+        if not user:
+            return RedirectResponse(url="/auth/login", status_code=302)
+    
     if not rds:
         return HTMLResponse(content=NO_REDIS_HTML, status_code=200)
     
     stats = _get_stats_from_redis(full)
     recent = await _get_recent_requests(limit=20)
-    html = _render_dashboard(stats, recent, full)
+    html = _render_dashboard(stats, recent, full, user)
     
     return HTMLResponse(content=html)
