@@ -25,9 +25,20 @@ A complete guide for setting up, configuring, and using the AI Gateway across pr
 |-----------|---------|-----------|
 | Gateway URL | Your deployed gateway endpoint | Yes |
 | Gateway API Key | Authentication for requests | Yes |
-| Anthropic API Key | Upstream Claude access | Yes (server-side) |
+| Provider API Key | At least one (Anthropic, OpenAI, Gemini, Groq) | Yes |
+| Ollama URL | Local model endpoint (optional) | No |
 | Redis | Caching, rate limiting | Recommended |
 | PostgreSQL | Usage tracking, memory, projects | Optional |
+
+### Supported Providers
+
+| Provider | Environment Variable | Models |
+|----------|---------------------|--------|
+| **Anthropic** | `ANTHROPIC_API_KEY` | claude-opus-4-5, claude-sonnet-4-0, haiku |
+| **OpenAI** | `OPENAI_API_KEY` | gpt-4o, gpt-4o-mini, o1, o1-mini |
+| **Google Gemini** | `GEMINI_API_KEY` | gemini-1.5-pro, gemini-2.0-flash |
+| **Groq** | `GROQ_API_KEY` | llama-3.3-70b, mixtral-8x7b |
+| **Ollama (Local)** | `LOCAL_LLM_BASE_URL` | qwen, llama, deepseek, codellama |
 
 ### Your Gateway Details
 
