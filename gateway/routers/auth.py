@@ -27,12 +27,12 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # =============================================================================
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    email: str  # Changed from EmailStr to allow admin@localhost
     password: str
 
 
 class RegisterRequest(BaseModel):
-    email: EmailStr
+    email: str  # Changed from EmailStr to allow admin@localhost
     password: str
     display_name: Optional[str] = None
 
@@ -411,6 +411,7 @@ LOGIN_PAGE_HTML = """
             const email = document.getElementById('email').value;
             const password = document.getElementById('password').value;
             const errorEl = document.getElementById('error');
+            errorEl.textContent = '';
             
             try {
                 const resp = await fetch('/auth/login', {
@@ -423,10 +424,17 @@ LOGIN_PAGE_HTML = """
                     window.location.href = '/dashboard';
                 } else {
                     const data = await resp.json();
-                    errorEl.textContent = data.detail || 'Login failed';
+                    // Handle Pydantic validation errors (array) or string errors
+                    if (Array.isArray(data.detail)) {
+                        errorEl.textContent = data.detail.map(e => e.msg || e.message || JSON.stringify(e)).join(', ');
+                    } else if (typeof data.detail === 'string') {
+                        errorEl.textContent = data.detail;
+                    } else {
+                        errorEl.textContent = 'Login failed: ' + JSON.stringify(data);
+                    }
                 }
             } catch (err) {
-                errorEl.textContent = 'Connection error';
+                errorEl.textContent = 'Connection error: ' + err.message;
             }
         });
     </script>
