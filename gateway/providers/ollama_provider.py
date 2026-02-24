@@ -62,13 +62,14 @@ class OllamaProvider(BaseProvider):
         return [f"ollama/{m}" for m in self._discovered_models]
     
     async def discover_models(self) -> List[str]:
-        """Discover available models from Ollama server."""
+        """Discover available models from Ollama server.
+        Uses OLLAMA_DISCOVERY_TIMEOUT_SECONDS so we respond before proxy timeouts (e.g. 10s).
+        """
         url = f"{self.base_url.rstrip('/')}/api/tags"
-        
+        timeout = getattr(config, "OLLAMA_DISCOVERY_TIMEOUT_SECONDS", 8.0)
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.get(url, headers=self._build_headers())
-                
                 if resp.status_code == 200:
                     data = resp.json()
                     self._discovered_models = [
@@ -79,6 +80,9 @@ class OllamaProvider(BaseProvider):
                 else:
                     log.warning("Ollama model discovery failed: %d", resp.status_code)
                     return []
+        except httpx.TimeoutException as e:
+            log.warning("Ollama model discovery timeout after %.0fs: %r", timeout, e)
+            return []
         except Exception as e:
             log.warning("Ollama model discovery error: %r", e)
             return []

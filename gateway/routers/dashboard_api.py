@@ -318,36 +318,47 @@ async def get_ollama_models(
     request: Request,
     user: Optional[dict] = Depends(optional_auth),
 ):
-    """Get list of locally available Ollama models."""
+    """Get list of locally available Ollama models.
+    Uses OLLAMA_DISCOVERY_TIMEOUT_SECONDS so we respond before proxy timeouts; returns empty list on timeout instead of 503.
+    """
     import httpx
     from gateway.providers.ollama_provider import OllamaProvider
-    
+
     provider = OllamaProvider()
     url = f"{provider.base_url.rstrip('/')}/api/tags"
-    
+    timeout = getattr(config, "OLLAMA_DISCOVERY_TIMEOUT_SECONDS", 8.0)
+
+    async def _fetch():
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(url, headers=provider._build_headers())
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            models = []
+            for m in data.get("models", []):
+                size_bytes = m.get("size", 0)
+                models.append({
+                    "name": m.get("name", "unknown"),
+                    "size": size_bytes,
+                    "modified_at": m.get("modified_at", ""),
+                    "digest": m.get("digest", "")[:12] if m.get("digest") else "",
+                })
+            return models
+
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url)
-            
-            if resp.status_code == 200:
-                data = resp.json()
-                models = []
-                for m in data.get("models", []):
-                    size_bytes = m.get("size", 0)
-                    models.append({
-                        "name": m.get("name", "unknown"),
-                        "size": size_bytes,
-                        "modified_at": m.get("modified_at", ""),
-                        "digest": m.get("digest", "")[:12] if m.get("digest") else "",
-                    })
-                return {"models": models}
-            else:
-                raise HTTPException(status_code=503, detail="Ollama not available")
+        models = await asyncio.wait_for(_fetch(), timeout=timeout + 1.0)
+        return {"models": models}
+    except httpx.TimeoutException as e:
+        log.warning("Ollama models timeout after %.0fs: %r", timeout, e)
+        return {"models": []}
     except httpx.ConnectError:
         raise HTTPException(status_code=503, detail="Ollama not running")
+    except asyncio.TimeoutError:
+        log.warning("Ollama models request timed out - returning empty list")
+        return {"models": []}
     except Exception as e:
         log.warning("Ollama models error: %r", e)
-        raise HTTPException(status_code=503, detail=str(e))
+        return {"models": []}
 
 
 @router.post("/ollama/pull")

@@ -145,6 +145,8 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # Ollama URL (alternative to LOCAL_LLM_BASE_URL)
 OLLAMA_URL = os.getenv("OLLAMA_URL", LOCAL_LLM_BASE_URL)
+# Timeout for GET /api/tags (model list). Keep under proxy timeout (e.g. 10s) to avoid 503.
+OLLAMA_DISCOVERY_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_DISCOVERY_TIMEOUT_SECONDS", "8"))
 
 # =============================================================================
 # Preference-Based Routing (NEW - Replaces old routing config)
