@@ -81,6 +81,8 @@ Or via UI:
 3. Settings → Models → Override OpenAI Base URL
 4. Enter: `https://your-gateway.railway.app/v1`
 
+**Project = API Key:** Cursor does not have a separate "Project ID" field. The value you set as **OpenAI API Key** is your **project key**. The gateway receives it in the `Authorization: Bearer <key>` header and resolves it to a project when multi-project is enabled. To have requests tied to a project (for preferences and model toggles), set **ENABLE_MULTI_PROJECT=1** and **DATABASE_URL** on the server, create a project via `POST /admin/projects` with that same `api_key`, and use that exact value as the API key in Cursor. You can verify the project resolved by checking the response header **X-Gateway-Project-Id** (and **X-Gateway-Project-Name**) in the Network tab for a chat request.
+
 ### Continue Extension
 
 Edit `~/.continue/config.json`:

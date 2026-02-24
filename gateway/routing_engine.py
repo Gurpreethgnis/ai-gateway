@@ -347,21 +347,23 @@ def get_routing_decision(
     prefs: RoutingPreferences,
     registry: "ModelRegistry",
     exclude_providers: Optional[List[str]] = None,
+    enabled_models: Optional[List[Any]] = None,
 ) -> RoutingDecision:
     """
     Make routing decision based on request features and preferences.
-    
+
     Args:
         features: Extracted request features
         prefs: User routing preferences
         registry: Model registry with available models
         exclude_providers: List of provider names to exclude
-        
+        enabled_models: If set, use this list instead of registry.get_enabled_models() (e.g. project overrides)
+
     Returns:
         RoutingDecision with primary model and cascade chain
     """
-    all_models = registry.get_enabled_models()
-    
+    all_models = enabled_models if enabled_models is not None else registry.get_enabled_models()
+
     # Exclude specified providers
     if exclude_providers:
         all_models = [m for m in all_models if m.provider not in exclude_providers]
@@ -438,22 +440,24 @@ async def route_request(
     preferences: Optional[RoutingPreferences] = None,
     registry: Optional["ModelRegistry"] = None,
     exclude_providers: Optional[List[str]] = None,
+    project_id: Optional[int] = None,
 ) -> RoutingDecision:
     """
     Main entry point for routing a request.
-    
+
     Args:
         messages: Conversation messages
         body: Full request body
         preferences: User preferences (uses defaults if None)
         registry: Model registry (uses global if None)
         exclude_providers: List of provider names to exclude
-        
+        project_id: If set, only models enabled for this project are considered (dashboard toggles)
+
     Returns:
         RoutingDecision
     """
     from gateway.model_registry import get_model_registry
-    
+
     if preferences is None:
         from gateway.config import (
             DEFAULT_COST_QUALITY_BIAS,
@@ -465,17 +469,21 @@ async def route_request(
             speed_quality_bias=DEFAULT_SPEED_QUALITY_BIAS,
             cascade_enabled=DEFAULT_CASCADE_ENABLED,
         )
-    
+
     if registry is None:
         registry = get_model_registry()
-    
+
+    # Apply project-specific model toggles (disabled models in dashboard are excluded)
+    enabled_models = await registry.get_enabled_models_for_project(project_id)
+
     # Extract features
     features = extract_request_features(messages, body)
-    
+
     # Get routing decision
     decision = get_routing_decision(
-        features, preferences, registry, 
-        exclude_providers=exclude_providers
+        features, preferences, registry,
+        exclude_providers=exclude_providers,
+        enabled_models=enabled_models,
     )
     
     log.info(
@@ -497,11 +505,13 @@ async def get_routing_decision_async(
     cost_quality_bias: Optional[float] = None,
     speed_quality_bias: Optional[float] = None,
     exclude_providers: Optional[List[str]] = None,
+    project_id: Optional[int] = None,
 ) -> RoutingDecision:
     """
     Async wrapper for routing decision with simplified interface.
-    
+
     This is the preferred interface for cascade_router and other callers.
+    project_id: When set, only models enabled for this project are used (respects dashboard toggles).
     """
     from gateway.config import (
         DEFAULT_COST_QUALITY_BIAS,
@@ -509,7 +519,7 @@ async def get_routing_decision_async(
         DEFAULT_CASCADE_ENABLED,
     )
     from gateway.model_registry import get_model_registry
-    
+
     # Build body dict
     body = {
         "messages": messages,
@@ -519,36 +529,40 @@ async def get_routing_decision_async(
         body["tools"] = tools
     if explicit_model:
         body["model"] = explicit_model
-    
+
     # Build preferences
     prefs = RoutingPreferences(
         cost_quality_bias=cost_quality_bias if cost_quality_bias is not None else DEFAULT_COST_QUALITY_BIAS,
         speed_quality_bias=speed_quality_bias if speed_quality_bias is not None else DEFAULT_SPEED_QUALITY_BIAS,
         cascade_enabled=DEFAULT_CASCADE_ENABLED,
     )
-    
+
     registry = get_model_registry()
-    
-    # If explicit model requested and it exists, use it directly
+
+    # If explicit model requested and it exists, use it directly (still respect project enable/disable)
     if explicit_model:
         model_info = registry.get_model(explicit_model)
         if model_info:
-            features = extract_request_features(messages, body)
-            return RoutingDecision(
-                primary_model=explicit_model,
-                provider=model_info.provider,
-                cascade_chain=[explicit_model],
-                scores={explicit_model: 1.0},
-                reasoning=f"Explicit model requested: {explicit_model}",
-                features=features,
-            )
-    
+            enabled_for_project = await registry.get_enabled_models_for_project(project_id)
+            if any(m.id == explicit_model for m in enabled_for_project):
+                features = extract_request_features(messages, body)
+                return RoutingDecision(
+                    primary_model=explicit_model,
+                    provider=model_info.provider,
+                    cascade_chain=[explicit_model],
+                    scores={explicit_model: 1.0},
+                    reasoning=f"Explicit model requested: {explicit_model}",
+                    features=features,
+                )
+            # Explicit model is disabled for this project - fall through to normal routing
+
     return await route_request(
         messages=messages,
         body=body,
         preferences=prefs,
         registry=registry,
         exclude_providers=exclude_providers,
+        project_id=project_id,
     )
 
 

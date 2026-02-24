@@ -60,6 +60,7 @@ async def route_with_cascade(
             explicit_model=explicit_model,
             cost_quality_bias=cost_quality_bias,
             speed_quality_bias=speed_quality_bias,
+            project_id=project_id,
         )
         return decision, None, {"cascade_enabled": False}
     
@@ -73,6 +74,7 @@ async def route_with_cascade(
         explicit_model=explicit_model,
         cost_quality_bias=cost_quality_bias,
         speed_quality_bias=speed_quality_bias,
+        project_id=project_id,
     )
     
     cascade_metadata = {
@@ -112,10 +114,11 @@ async def route_with_cascade(
             # Local call failed, get next best model
             log.warning("Cascade: local call failed, escalating")
             escalated_decision = await _get_escalation_decision(
-                messages, tools, system_prompt, 
+                messages, tools, system_prompt,
                 exclude_provider="ollama",
                 cost_quality_bias=cost_quality_bias,
                 speed_quality_bias=speed_quality_bias,
+                project_id=project_id,
             )
             cascade_metadata["escalated"] = True
             cascade_metadata["escalation_reason"] = "local_call_failed"
@@ -150,6 +153,7 @@ async def route_with_cascade(
             exclude_provider="ollama",
             cost_quality_bias=cost_quality_bias,
             speed_quality_bias=speed_quality_bias,
+            project_id=project_id,
         )
         cascade_metadata["escalated"] = True
         cascade_metadata["escalation_reason"] = fail_reason or "quality_check_failed"
@@ -165,6 +169,7 @@ async def route_with_cascade(
             exclude_provider="ollama",
             cost_quality_bias=cost_quality_bias,
             speed_quality_bias=speed_quality_bias,
+            project_id=project_id,
         )
         cascade_metadata["escalated"] = True
         cascade_metadata["escalation_reason"] = f"exception:{str(e)[:30]}"
@@ -179,13 +184,13 @@ async def _get_escalation_decision(
     exclude_provider: str,
     cost_quality_bias: Optional[float] = None,
     speed_quality_bias: Optional[float] = None,
+    project_id: Optional[int] = None,
 ):
     """
     Get the next best model, excluding the specified provider.
     """
     from gateway.routing_engine import get_routing_decision_async
-    
-    # Re-run routing with excluded provider
+
     return await get_routing_decision_async(
         messages=messages,
         tools=tools,
@@ -194,6 +199,7 @@ async def _get_escalation_decision(
         cost_quality_bias=cost_quality_bias,
         speed_quality_bias=speed_quality_bias,
         exclude_providers=[exclude_provider],
+        project_id=project_id,
     )
 
 

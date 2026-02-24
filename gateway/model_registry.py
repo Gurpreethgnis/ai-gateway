@@ -525,7 +525,54 @@ class ModelRegistry:
             m for m in self.models.values()
             if m.is_enabled and m.provider in self._available_providers
         ]
-    
+
+    async def get_enabled_models_for_project(self, project_id: Optional[int]) -> List[ModelInfo]:
+        """
+        Get enabled models, applying project-specific overrides from model_settings.
+        When project_id is None, uses global overrides from model_settings (project_id IS NULL) so
+        dashboard toggles are respected across all workers.
+        When project_id is set, uses that project's overrides so per-project toggles are respected.
+        """
+        base = [
+            m for m in self.models.values()
+            if m.provider in self._available_providers
+        ]
+        from gateway.config import DATABASE_URL
+        if not DATABASE_URL:
+            return [m for m in base if m.is_enabled]
+        try:
+            from gateway.db import get_session
+            from sqlalchemy import text
+            async with get_session() as session:
+                if project_id is None:
+                    result = await session.execute(
+                        text("""
+                            SELECT model_id, is_enabled
+                            FROM model_settings
+                            WHERE project_id IS NULL
+                        """)
+                    )
+                else:
+                    result = await session.execute(
+                        text("""
+                            SELECT model_id, is_enabled
+                            FROM model_settings
+                            WHERE project_id = :project_id
+                        """),
+                        {"project_id": project_id},
+                    )
+                overrides = {row[0]: bool(row[1]) for row in result.fetchall()}
+        except Exception as e:
+            log.debug("Could not load model settings: %r", e)
+            return [m for m in base if m.is_enabled]
+        # If no overrides, use in-memory is_enabled
+        out = []
+        for m in base:
+            effective = overrides.get(m.id, m.is_enabled)
+            if effective:
+                out.append(m)
+        return out
+
     def get_models_by_provider(self, provider: str) -> List[ModelInfo]:
         """Get all models for a specific provider."""
         return [m for m in self.models.values() if m.provider == provider]

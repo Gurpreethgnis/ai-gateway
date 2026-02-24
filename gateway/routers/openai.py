@@ -731,10 +731,14 @@ async def openai_chat_completions(req: Request):
                         return StreamingResponse(
                             _local_sse(),
                             media_type="text/event-stream",
-                            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                            headers={
+                                "Cache-Control": "no-cache",
+                                "X-Accel-Buffering": "no",
+                                **({"X-Gateway-Project-Id": str(project_id), "X-Gateway-Project-Name": project_name or ""} if project_id is not None else {"X-Gateway-Project-Id": ""}),
+                            },
                         )
-                    
-                    return {
+
+                    out = {
                         "id": f"chatcmpl-local-{ray}",
                         "object": "chat.completion",
                         "created": int(time.time()),
@@ -749,7 +753,15 @@ async def openai_chat_completions(req: Request):
                         }],
                         "usage": local_usage,
                     }
-                
+                    resp = JSONResponse(content=out)
+                    if project_id is not None:
+                        resp.headers["X-Gateway-Project-Id"] = str(project_id)
+                        if project_name:
+                            resp.headers["X-Gateway-Project-Name"] = project_name
+                    else:
+                        resp.headers["X-Gateway-Project-Id"] = ""
+                    return resp
+
                 # No local response, use decision for provider routing
                 if decision.provider == "ollama":
                     # This shouldn't happen (cascade should have returned local_response)
@@ -1142,6 +1154,12 @@ async def openai_chat_completions(req: Request):
         response.headers["X-Model-Source"] = "custom"
         response.headers["X-Cache"] = "MISS"
         response.headers["X-Reduction"] = "1"
+        if project_id is not None:
+            response.headers["X-Gateway-Project-Id"] = str(project_id)
+            if project_name:
+                response.headers["X-Gateway-Project-Name"] = project_name
+        else:
+            response.headers["X-Gateway-Project-Id"] = ""
         return response
 
     increment_active_requests(model)
@@ -1328,7 +1346,13 @@ async def openai_chat_completions(req: Request):
     response = JSONResponse(content=resp_json)
     response.headers["X-Gateway"] = "claude-gateway"
     response.headers["X-Model-Source"] = "custom"
-    
+    # So Cursor/users can verify the project resolved from the API key (Option B)
+    if project_id is not None:
+        response.headers["X-Gateway-Project-Id"] = str(project_id)
+        if project_name:
+            response.headers["X-Gateway-Project-Name"] = project_name
+    else:
+        response.headers["X-Gateway-Project-Id"] = ""
     # Set cache status based on actual cache usage
     cache_hit = usage and usage.get("cache_read_input_tokens", 0) > 0
     response.headers["X-Cache"] = "HIT" if cache_hit else "MISS"

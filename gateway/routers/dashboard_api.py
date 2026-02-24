@@ -103,6 +103,16 @@ class PullJobStatus(BaseModel):
 # Preferences Endpoints
 # =============================================================================
 
+async def _get_first_project_id() -> Optional[int]:
+    """Get id of the first project (by id) for default preferences when no project_id is sent."""
+    from gateway.db import get_session
+    from sqlalchemy import text
+    async with get_session() as session:
+        result = await session.execute(text("SELECT id FROM projects ORDER BY id ASC LIMIT 1"))
+        row = result.fetchone()
+        return row[0] if row else None
+
+
 @router.get("/preferences")
 async def get_preferences(
     request: Request,
@@ -112,12 +122,13 @@ async def get_preferences(
     """Get routing preferences for the current user/project."""
     from gateway.db import get_session
     from sqlalchemy import text
-    
+
+    # When no project_id is provided (e.g. dashboard without project selector), use first project so preferences persist
     if project_id:
         async with get_session() as session:
             result = await session.execute(
                 text("""
-                    SELECT cost_quality_bias, speed_quality_bias, 
+                    SELECT cost_quality_bias, speed_quality_bias,
                            cascade_enabled, max_cascade_attempts
                     FROM projects
                     WHERE api_key = :project_id
@@ -125,16 +136,35 @@ async def get_preferences(
                 {"project_id": project_id},
             )
             row = result.fetchone()
-            
             if row:
                 return RoutingPreferences(
-                    cost_quality_bias=row[0] or config.DEFAULT_COST_QUALITY_BIAS,
-                    speed_quality_bias=row[1] or config.DEFAULT_SPEED_QUALITY_BIAS,
+                    cost_quality_bias=row[0] if row[0] is not None else config.DEFAULT_COST_QUALITY_BIAS,
+                    speed_quality_bias=row[1] if row[1] is not None else config.DEFAULT_SPEED_QUALITY_BIAS,
                     cascade_enabled=row[2] if row[2] is not None else config.DEFAULT_CASCADE_ENABLED,
                     max_cascade_attempts=row[3] or 3,
                 )
-    
-    # Return defaults
+
+    first_id = await _get_first_project_id()
+    if first_id is not None:
+        async with get_session() as session:
+            result = await session.execute(
+                text("""
+                    SELECT cost_quality_bias, speed_quality_bias,
+                           cascade_enabled, max_cascade_attempts
+                    FROM projects
+                    WHERE id = :pid
+                """),
+                {"pid": first_id},
+            )
+            row = result.fetchone()
+            if row:
+                return RoutingPreferences(
+                    cost_quality_bias=row[0] if row[0] is not None else config.DEFAULT_COST_QUALITY_BIAS,
+                    speed_quality_bias=row[1] if row[1] is not None else config.DEFAULT_SPEED_QUALITY_BIAS,
+                    cascade_enabled=row[2] if row[2] is not None else config.DEFAULT_CASCADE_ENABLED,
+                    max_cascade_attempts=row[3] or 3,
+                )
+
     return RoutingPreferences(
         cost_quality_bias=config.DEFAULT_COST_QUALITY_BIAS,
         speed_quality_bias=config.DEFAULT_SPEED_QUALITY_BIAS,
@@ -150,10 +180,10 @@ async def update_preferences(
     project_id: Optional[str] = None,
     user: Optional[dict] = Depends(optional_auth),
 ):
-    """Update routing preferences."""
+    """Update routing preferences. When no project_id is sent, updates the first project so saves persist."""
     from gateway.db import get_session
     from sqlalchemy import text
-    
+
     if project_id:
         async with get_session() as session:
             result = await session.execute(
@@ -174,13 +204,36 @@ async def update_preferences(
                     "max_cascade_attempts": prefs.max_cascade_attempts,
                 },
             )
-            
-            if not result.scalar():
+            if result.fetchone() is None:
                 raise HTTPException(status_code=404, detail="Project not found")
-    
-    log.info("Preferences updated for project %s: cost_bias=%.2f, speed_bias=%.2f",
-             project_id, prefs.cost_quality_bias, prefs.speed_quality_bias)
-    
+    else:
+        first_id = await _get_first_project_id()
+        if first_id is not None:
+            async with get_session() as session:
+                result = await session.execute(
+                    text("""
+                        UPDATE projects
+                        SET cost_quality_bias = :cost_quality_bias,
+                            speed_quality_bias = :speed_quality_bias,
+                            cascade_enabled = :cascade_enabled,
+                            max_cascade_attempts = :max_cascade_attempts
+                        WHERE id = :pid
+                        RETURNING id
+                    """),
+                    {
+                        "pid": first_id,
+                        "cost_quality_bias": prefs.cost_quality_bias,
+                        "speed_quality_bias": prefs.speed_quality_bias,
+                        "cascade_enabled": prefs.cascade_enabled,
+                        "max_cascade_attempts": prefs.max_cascade_attempts,
+                    },
+                )
+                if result.fetchone() is None:
+                    raise HTTPException(status_code=404, detail="Project not found")
+
+    log.info("Preferences updated (project_id=%s): cost_bias=%.2f, speed_bias=%.2f",
+             project_id or "first", prefs.cost_quality_bias, prefs.speed_quality_bias)
+
     return {"success": True, "preferences": prefs}
 
 
@@ -259,19 +312,40 @@ async def set_model_enabled(
     project_id: Optional[str] = None,
     user: Optional[dict] = Depends(optional_auth),
 ):
-    """Enable or disable a model for a project."""
+    """Enable or disable a model for a project (or globally when no project_id)."""
     from gateway.db import get_session
     from gateway.model_registry import get_model_registry
     from sqlalchemy import text
-    
-    # If no project_id, just update the in-memory registry (global setting)
+
+    # If no project_id, update global setting in DB (so all workers respect it) and in-memory
     if not project_id:
         registry = get_model_registry()
         model = registry.get_model(model_id)
         if model:
             model.is_enabled = settings.is_enabled
+        try:
+            async with get_session() as session:
+                # UPDATE first (ON CONFLICT with NULL project_id is unreliable across PG versions)
+                r = await session.execute(
+                    text("""
+                        UPDATE model_settings
+                        SET is_enabled = :is_enabled
+                        WHERE project_id IS NULL AND model_id = :model_id
+                    """),
+                    {"model_id": model_id, "is_enabled": settings.is_enabled},
+                )
+                if r.rowcount == 0:
+                    await session.execute(
+                        text("""
+                            INSERT INTO model_settings (project_id, model_id, is_enabled, custom_quality_rating)
+                            VALUES (NULL, :model_id, :is_enabled, NULL)
+                        """),
+                        {"model_id": model_id, "is_enabled": settings.is_enabled},
+                    )
+        except Exception as e:
+            log.warning("Failed to persist global model toggle to DB: %r", e)
         return {"success": True, "model_id": model_id, "is_enabled": settings.is_enabled}
-    
+
     async with get_session() as session:
         # Get project ID
         result = await session.execute(

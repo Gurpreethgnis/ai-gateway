@@ -120,6 +120,7 @@ async def route_request(
             explicit_model=explicit_model,
             cost_quality_bias=cost_quality_bias,
             speed_quality_bias=speed_quality_bias,
+            project_id=project_id,
         )
         
         # Convert to legacy format

@@ -223,6 +223,20 @@ DASHBOARD_HTML = """
             document.getElementById('speed-quality').addEventListener('input', function() {
                 document.getElementById('speed-quality-val').textContent = this.value + '%';
             });
+            async function loadPreferences() {
+                try {
+                    const resp = await fetch('/api/preferences');
+                    if (!resp.ok) return;
+                    const prefs = await resp.json();
+                    const costPct = Math.round((prefs.cost_quality_bias ?? 0.3) * 100);
+                    const speedPct = Math.round((prefs.speed_quality_bias ?? 0.5) * 100);
+                    document.getElementById('cost-quality').value = costPct;
+                    document.getElementById('cost-quality-val').textContent = costPct + '%';
+                    document.getElementById('speed-quality').value = speedPct;
+                    document.getElementById('speed-quality-val').textContent = speedPct + '%';
+                    document.getElementById('cascade-enabled').checked = prefs.cascade_enabled !== false;
+                } catch (e) { console.warn('Load preferences failed:', e); }
+            }
             async function savePreferences() {
                 const prefs = {
                     cost_quality_bias: document.getElementById('cost-quality').value / 100,
@@ -346,8 +360,9 @@ DASHBOARD_HTML = """
                 }
             }
             
-            // Load models on page load
+            // Load models and preferences on page load
             document.addEventListener('DOMContentLoaded', function() {
+                loadPreferences();
                 loadModels();
                 loadOllamaModels();
             });
