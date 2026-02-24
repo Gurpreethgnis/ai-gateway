@@ -88,9 +88,9 @@ async def chat(req: Request, body: ChatReq):
                         log.info("CHAT cascade: returning local response")
                         return local_response
                     
-                    model = decision.model
-                    log.info("CHAT cascade -> %s (tier=%s, escalated=%s)", 
-                            model, decision.tier, cascade_metadata.get("escalated"))
+                    model = decision.primary_model
+                    log.info("CHAT cascade -> %s (provider=%s, escalated=%s)",
+                            model, decision.provider, cascade_metadata.get("escalated"))
                 else:
                     # Standard smart routing
                     from gateway.smart_routing import route_request
@@ -103,11 +103,11 @@ async def chat(req: Request, body: ChatReq):
                     )
                     
                     if decision.provider == "local":
-                        log.info("CHAT smart routing -> LOCAL (tier=%s, phase=%s)", decision.tier, decision.phase)
+                        log.info("CHAT smart routing -> LOCAL (tier=%s, phase=%s)", getattr(decision, "tier", "local"), getattr(decision, "phase", ""))
                         return await _handle_local_provider(body, ray)
                     
-                    model = decision.model
-                    log.info("CHAT smart routing -> %s (tier=%s, phase=%s)", model, decision.tier, decision.phase)
+                    model = decision.primary_model
+                    log.info("CHAT smart routing -> %s (tier=%s, phase=%s)", model, getattr(decision, "tier", decision.provider), getattr(decision, "phase", ""))
             else:
                 joined_user = "\n".join(m.content for m in body.messages if m.role == "user")
                 model = route_model_from_messages(joined_user, body.model)

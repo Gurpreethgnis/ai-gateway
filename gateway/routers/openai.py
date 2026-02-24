@@ -750,13 +750,12 @@ async def openai_chat_completions(req: Request):
                         "usage": local_usage,
                     }
                 
-                # No local response, use decision for Claude routing
-                if decision.provider == "local":
+                # No local response, use decision for provider routing
+                if decision.provider == "ollama":
                     # This shouldn't happen (cascade should have returned local_response)
-                    log.warning("Cascade returned local tier but no response, routing to Claude")
-                
-                model = decision.model
-                log.info("Cascade routing -> %s (tier=%s, phase=%s)", model, decision.tier, decision.phase)
+                    log.warning("Cascade returned ollama but no response, using decision.primary_model")
+                model = decision.primary_model
+                log.info("Cascade routing -> %s (provider=%s)", model, decision.provider)
             else:
                 # Standard routing (no cascade)
                 from gateway.smart_routing import route_request
@@ -764,12 +763,12 @@ async def openai_chat_completions(req: Request):
                 
                 # If routed to local provider, handle via local provider
                 if decision.provider == "local":
-                    log.info("OA smart routing -> LOCAL (tier=%s, phase=%s)", decision.tier, decision.phase)
+                    log.info("OA smart routing -> LOCAL (tier=%s, phase=%s)", getattr(decision, "tier", "local"), getattr(decision, "phase", ""))
                     return await handle_local_provider(parsed, ray, t0)
                 
-                # Otherwise use Claude with the selected model
-                model = decision.model
-                log.info("OA smart routing -> %s (tier=%s, phase=%s)", model, decision.tier, decision.phase)
+                # Otherwise use selected model (may be Anthropic, Gemini, Groq, etc.)
+                model = decision.primary_model
+                log.info("OA smart routing -> %s (tier=%s, phase=%s)", model, getattr(decision, "tier", decision.provider), getattr(decision, "phase", ""))
         except Exception as e:
             log.warning("Smart routing failed: %r", e)
             model = route_model_from_messages(joined_user, request_model)
