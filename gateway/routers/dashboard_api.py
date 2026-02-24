@@ -20,11 +20,21 @@ from pydantic import BaseModel, Field
 from pydantic import ConfigDict
 
 from gateway.logging_setup import log
-from gateway.routers.auth import require_auth
+from gateway.routers.auth import require_auth, get_current_user
 from gateway import config
 
 
 router = APIRouter(prefix="/api", tags=["dashboard-api"])
+
+
+async def optional_auth(request: Request) -> Optional[dict]:
+    """
+    Require auth only if ENABLE_DASHBOARD_AUTH is enabled.
+    Returns user dict or None if auth is disabled.
+    """
+    if not config.ENABLE_DASHBOARD_AUTH:
+        return None
+    return await require_auth(request)
 
 
 # =============================================================================
@@ -97,7 +107,7 @@ class PullJobStatus(BaseModel):
 async def get_preferences(
     request: Request,
     project_id: Optional[str] = None,
-    user: dict = Depends(require_auth),
+    user: Optional[dict] = Depends(optional_auth),
 ) -> RoutingPreferences:
     """Get routing preferences for the current user/project."""
     from gateway.db import get_session
@@ -138,7 +148,7 @@ async def update_preferences(
     request: Request,
     prefs: RoutingPreferences,
     project_id: Optional[str] = None,
-    user: dict = Depends(require_auth),
+    user: Optional[dict] = Depends(optional_auth),
 ):
     """Update routing preferences."""
     from gateway.db import get_session
@@ -182,7 +192,7 @@ async def update_preferences(
 async def get_models(
     request: Request,
     project_id: Optional[str] = None,
-    user: dict = Depends(require_auth),
+    user: Optional[dict] = Depends(optional_auth),
 ) -> List[ModelInfo]:
     """Get all available models with their settings."""
     from gateway.model_registry import get_model_registry
@@ -238,7 +248,7 @@ async def set_model_enabled(
     model_id: str,
     settings: ModelSettingsUpdate,
     project_id: str,
-    user: dict = Depends(require_auth),
+    user: Optional[dict] = Depends(optional_auth),
 ):
     """Enable or disable a model for a project."""
     from gateway.db import get_session
@@ -288,7 +298,7 @@ async def set_model_enabled(
 @router.get("/ollama/models")
 async def get_ollama_models(
     request: Request,
-    user: dict = Depends(require_auth),
+    user: Optional[dict] = Depends(optional_auth),
 ) -> List[OllamaModelInfo]:
     """Get list of locally available Ollama models."""
     from gateway.providers.ollama_provider import OllamaProvider
@@ -304,7 +314,7 @@ async def pull_ollama_model(
     request: Request,
     body: OllamaPullRequest,
     background_tasks: BackgroundTasks,
-    user: dict = Depends(require_auth),
+    user: Optional[dict] = Depends(optional_auth),
 ):
     """
     Start pulling an Ollama model.
@@ -386,7 +396,7 @@ async def _pull_model_task(job_id: int, model_name: str):
 async def get_pull_status(
     request: Request,
     job_id: int,
-    user: dict = Depends(require_auth),
+    user: Optional[dict] = Depends(optional_auth),
 ) -> PullJobStatus:
     """Get status of an Ollama pull job."""
     from gateway.db import get_session
@@ -420,7 +430,7 @@ async def get_pull_status(
 async def delete_ollama_model(
     request: Request,
     model_name: str,
-    user: dict = Depends(require_auth),
+    user: Optional[dict] = Depends(optional_auth),
 ):
     """Delete an Ollama model."""
     from gateway.providers.ollama_provider import OllamaProvider
@@ -445,7 +455,7 @@ async def get_stats(
     request: Request,
     project_id: Optional[str] = None,
     days: int = 7,
-    user: dict = Depends(require_auth),
+    user: Optional[dict] = Depends(optional_auth),
 ) -> UsageStats:
     """Get usage statistics."""
     from gateway.db import get_session
@@ -541,7 +551,7 @@ def _extract_provider(model: str) -> str:
 @router.get("/providers/status")
 async def get_provider_status(
     request: Request,
-    user: dict = Depends(require_auth),
+    user: Optional[dict] = Depends(optional_auth),
 ):
     """Check status of all configured providers."""
     from gateway.providers.registry import get_provider_registry
