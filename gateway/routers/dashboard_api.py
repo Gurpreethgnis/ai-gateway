@@ -198,7 +198,7 @@ async def get_models(
     from gateway.model_registry import get_model_registry
     
     registry = get_model_registry()
-    models = registry.get_all_models()
+    models = list(registry.models.values())
     
     # Get project-specific settings if project_id provided
     custom_settings = {}
