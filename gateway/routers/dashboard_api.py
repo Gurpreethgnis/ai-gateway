@@ -68,8 +68,8 @@ class ModelInfo(BaseModel):
     cost_per_1k_input: float
     cost_per_1k_output: float
     latency_ms: int
-    context_window: int
-    capabilities: List[str]
+    context_window: int = 128000
+    capabilities: List[str] = []
 
 
 class OllamaModelInfo(BaseModel):
@@ -226,17 +226,26 @@ async def get_models(
     result = []
     for model in models:
         custom = custom_settings.get(model.id, {})
+        # Build capabilities list from model attributes
+        caps = []
+        if getattr(model, 'supports_tools', False):
+            caps.append('tools')
+        if getattr(model, 'supports_vision', False):
+            caps.append('vision')
+        if getattr(model, 'supports_streaming', True):
+            caps.append('streaming')
+        
         result.append(ModelInfo(
             id=model.id,
             provider=model.provider,
-            display_name=model.id.replace("-", " ").title(),
-            is_enabled=custom.get("is_enabled", True),
-            quality_rating=custom.get("custom_quality_rating") or model.quality_rating,
-            cost_per_1k_input=model.cost_per_1k_input,
-            cost_per_1k_output=model.cost_per_1k_output,
-            latency_ms=model.latency_ms_first_token,
-            context_window=model.context_window,
-            capabilities=model.capabilities,
+            display_name=getattr(model, 'display_name', model.id.replace("-", " ").title()),
+            is_enabled=custom.get("is_enabled", getattr(model, 'is_enabled', True)),
+            quality_rating=custom.get("custom_quality_rating") or getattr(model, 'quality_rating', 0.75),
+            cost_per_1k_input=getattr(model, 'cost_per_1m_input', 0.0) / 1000,
+            cost_per_1k_output=getattr(model, 'cost_per_1m_output', 0.0) / 1000,
+            latency_ms=getattr(model, 'avg_latency_ms', 500),
+            context_window=getattr(model, 'context_window', 128000),
+            capabilities=caps,
         ))
     
     return result
@@ -247,12 +256,21 @@ async def set_model_enabled(
     request: Request,
     model_id: str,
     settings: ModelSettingsUpdate,
-    project_id: str,
+    project_id: Optional[str] = None,
     user: Optional[dict] = Depends(optional_auth),
 ):
     """Enable or disable a model for a project."""
     from gateway.db import get_session
+    from gateway.model_registry import get_model_registry
     from sqlalchemy import text
+    
+    # If no project_id, just update the in-memory registry (global setting)
+    if not project_id:
+        registry = get_model_registry()
+        model = registry.get_model(model_id)
+        if model:
+            model.is_enabled = settings.is_enabled
+        return {"success": True, "model_id": model_id, "is_enabled": settings.is_enabled}
     
     async with get_session() as session:
         # Get project ID
@@ -299,14 +317,37 @@ async def set_model_enabled(
 async def get_ollama_models(
     request: Request,
     user: Optional[dict] = Depends(optional_auth),
-) -> List[OllamaModelInfo]:
+):
     """Get list of locally available Ollama models."""
+    import httpx
     from gateway.providers.ollama_provider import OllamaProvider
     
     provider = OllamaProvider()
-    models = await provider.discover_models()
+    url = f"{provider.base_url.rstrip('/')}/api/tags"
     
-    return models
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url)
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                models = []
+                for m in data.get("models", []):
+                    size_bytes = m.get("size", 0)
+                    models.append({
+                        "name": m.get("name", "unknown"),
+                        "size": size_bytes,
+                        "modified_at": m.get("modified_at", ""),
+                        "digest": m.get("digest", "")[:12] if m.get("digest") else "",
+                    })
+                return {"models": models}
+            else:
+                raise HTTPException(status_code=503, detail="Ollama not available")
+    except httpx.ConnectError:
+        raise HTTPException(status_code=503, detail="Ollama not running")
+    except Exception as e:
+        log.warning("Ollama models error: %r", e)
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.post("/ollama/pull")
