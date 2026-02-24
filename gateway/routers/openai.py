@@ -901,7 +901,17 @@ async def openai_chat_completions(req: Request):
 
     is_stream = parsed.get("stream", False)
     if is_stream:
-        if client is None:
+        # Resolve which provider will handle streaming (must match routed model, not always Anthropic)
+        from gateway.providers.registry import get_provider_for_model
+        from gateway.model_registry import get_model_registry
+        stream_provider = get_provider_for_model(model)
+        model_info = get_model_registry().get_model(model)
+        use_anthropic_stream = (
+            stream_provider is None
+            or getattr(stream_provider, "name", "") == "anthropic"
+            or (model_info and model_info.provider == "anthropic")
+        )
+        if use_anthropic_stream and client is None:
             raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set")
 
         include_usage = False
@@ -919,6 +929,73 @@ async def openai_chat_completions(req: Request):
             loop = asyncio.get_running_loop()
             increment_active_requests(model)
 
+            # Stream via the routed provider (Gemini, OpenAI, Groq) when not Anthropic
+            if not use_anthropic_stream and stream_provider is not None:
+                req_id = acquire_concurrency_slot(model)
+                try:
+                    current_tool_call_idx = -1
+                    async for chunk in stream_provider.stream(
+                        messages=aa_messages,
+                        model=model,
+                        system=system_param,
+                        tools=aa_tools or None,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    ):
+                        if chunk.content:
+                            event = {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": with_model_prefix(model),
+                                "choices": [{"index": 0, "delta": {"content": chunk.content}}],
+                            }
+                            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                        if chunk.tool_calls:
+                            for tc in chunk.tool_calls:
+                                current_tool_call_idx += 1
+                                tc_with_index = {**tc, "index": current_tool_call_idx} if isinstance(tc, dict) else tc
+                                event = {
+                                    "id": chunk_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": with_model_prefix(model),
+                                    "choices": [{"index": 0, "delta": {"tool_calls": [tc_with_index]}}],
+                                }
+                                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                        if chunk.is_final:
+                            finish_reason = chunk.finish_reason or ("stop" if current_tool_call_idx < 0 else "tool_calls")
+                            final_chunk = {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": with_model_prefix(model),
+                                "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+                            }
+                            yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
+                            yield "data: [DONE]\n\n"
+                            dt_ms = int((time.time() - stream_t0) * 1000)
+                            log.info("OA STREAM DONE (cf-ray=%s) model=%s provider=%s ms=%s",
+                                     ray, model, getattr(stream_provider, "name", "?"), dt_ms)
+                            record_stream_duration(model, project_name or "default", dt_ms / 1000.0)
+                            record_request(model, project_name or "default", 200, "/v1/chat/completions", dt_ms / 1000.0)
+                except Exception as e:
+                    log.exception("Stream failed for model %s: %r", model, e)
+                    record_upstream_error(model, "stream_error", 500)
+                    err_chunk = {
+                        "id": chunk_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": with_model_prefix(model),
+                        "choices": [{"index": 0, "delta": {"content": f"\n\n[Upstream Error: {str(e)}]"}, "finish_reason": "stop"}],
+                    }
+                    yield f"data: {json.dumps(err_chunk, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                finally:
+                    release_concurrency_slot(model, req_id)
+                    decrement_active_requests(model)
+                return
+
             def _worker_stream():
                 import time
                 from gateway.retry import is_retryable_error
@@ -928,7 +1005,7 @@ async def openai_chat_completions(req: Request):
 
                 for attempt in range(max_attempts):
                     yielded_any = False
-                    
+
                     req_id = acquire_concurrency_slot(payload["model"])
                     acquired_model = payload["model"]  # save before any failover changes it
                     try:
