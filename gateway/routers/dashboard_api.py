@@ -17,6 +17,7 @@ from typing import Optional, List
 
 from fastapi import APIRouter, Request, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel, Field
+from pydantic import ConfigDict
 
 from gateway.logging_setup import log
 from gateway.routers.auth import require_auth
@@ -44,6 +45,7 @@ class ModelSettingsUpdate(BaseModel):
 
 
 class OllamaPullRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     model_name: str
 
 
@@ -78,6 +80,7 @@ class UsageStats(BaseModel):
 
 
 class PullJobStatus(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     id: int
     model_name: str
     status: str  # pending, pulling, completed, failed

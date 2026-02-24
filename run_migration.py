@@ -80,7 +80,22 @@ async def run_builtin_migration():
         from sqlalchemy import text
         
         db_url = _to_asyncpg_url(DATABASE_URL)
-        engine = create_async_engine(db_url, echo=True)
+        engine = create_async_engine(db_url, echo=False)
+        
+        # Check if full_content already exists so we don't run ALTER on every deploy
+        check_sql = """
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'file_hash_entries' AND column_name = 'full_content';
+        """
+        skip = False
+        async with engine.begin() as conn:
+            row = (await conn.execute(text(check_sql))).fetchone()
+            if row:
+                skip = True
+        if skip:
+            print("[SKIP] full_content column already exists. Nothing to do.")
+            await engine.dispose()
+            return True
         
         migration_sql = """
         ALTER TABLE file_hash_entries 
