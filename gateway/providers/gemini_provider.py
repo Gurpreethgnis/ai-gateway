@@ -134,21 +134,41 @@ class GeminiProvider(BaseProvider):
         
         return contents, system_instruction
     
+    # JSON Schema keys that Gemini's Schema type does not support (causes ValueError if present)
+    _GEMINI_UNSUPPORTED_SCHEMA_KEYS = frozenset({
+        "minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems",
+        "pattern", "default", "examples", "exclusiveMinimum", "exclusiveMaximum",
+    })
+
+    def _sanitize_schema_for_gemini(self, obj: Any) -> Any:
+        """Recursively remove JSON Schema keys that Gemini API does not accept."""
+        if isinstance(obj, dict):
+            return {
+                k: self._sanitize_schema_for_gemini(v)
+                for k, v in obj.items()
+                if k not in self._GEMINI_UNSUPPORTED_SCHEMA_KEYS
+            }
+        if isinstance(obj, list):
+            return [self._sanitize_schema_for_gemini(item) for item in obj]
+        return obj
+
     def _convert_tools_to_gemini(self, tools: List[Dict]) -> List[Dict]:
         """Convert OpenAI-style tools to Gemini function declarations."""
         if not tools:
             return []
-        
+
         functions = []
         for tool in tools:
             if tool.get("type") == "function":
                 func = tool.get("function", {})
+                parameters = func.get("parameters") or {}
+                parameters = self._sanitize_schema_for_gemini(parameters)
                 functions.append({
                     "name": func.get("name", ""),
                     "description": func.get("description", ""),
-                    "parameters": func.get("parameters", {}),
+                    "parameters": parameters,
                 })
-        
+
         return [{"function_declarations": functions}] if functions else []
     
     async def complete(
