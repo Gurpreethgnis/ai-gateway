@@ -49,6 +49,25 @@ class GeminiProvider(BaseProvider):
     def get_models(self) -> List[str]:
         return ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash"]
     
+    def _normalize_system_instruction(self, system: Any) -> Optional[str]:
+        """Normalize system prompt to a plain string. Accepts Anthropic-style blocks (type, text, cache_control)."""
+        if system is None:
+            return None
+        if isinstance(system, str):
+            return system.strip() or None
+        if isinstance(system, list):
+            parts = []
+            for block in system:
+                if isinstance(block, dict):
+                    if block.get("type") == "text":
+                        parts.append(block.get("text", "") or "")
+                    elif "text" in block:
+                        parts.append(block["text"])
+                elif isinstance(block, str):
+                    parts.append(block)
+            return "\n\n".join(p for p in parts if p).strip() or None
+        return str(system).strip() or None
+
     def _convert_messages_to_gemini(
         self,
         messages: List[Dict],
@@ -56,7 +75,7 @@ class GeminiProvider(BaseProvider):
     ) -> tuple:
         """Convert OpenAI-style messages to Gemini format."""
         contents = []
-        system_instruction = system
+        system_instruction = self._normalize_system_instruction(system)
         
         for msg in messages:
             role = msg.get("role", "user")
