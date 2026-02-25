@@ -11,6 +11,8 @@ from gateway.config import (
     RATE_LIMIT_REQUESTS_PER_MINUTE,
     STRIP_IDE_BOILERPLATE,
     ENFORCE_DIFF_FIRST,
+    DEFAULT_COST_QUALITY_BIAS,
+    DEFAULT_SPEED_QUALITY_BIAS,
 )
 from gateway.logging_setup import log
 from gateway.db import hash_api_key
@@ -139,6 +141,45 @@ async def get_project_by_id(project_id: int) -> Optional[ProjectInfo]:
     except Exception as e:
         log.warning("Failed to get project by ID: %r", e)
         return None
+
+
+async def get_routing_preferences(project_id: Optional[int]) -> tuple:
+    """
+    Load saved routing preferences (cost/speed bias) for the project.
+    Returns (cost_quality_bias, speed_quality_bias) for use in routing.
+    When project_id is None or not found, uses first project by id; falls back to config defaults.
+    """
+    if not DATABASE_URL:
+        return (DEFAULT_COST_QUALITY_BIAS, DEFAULT_SPEED_QUALITY_BIAS)
+    try:
+        from gateway.db import get_session
+        from sqlalchemy import text
+
+        pid = project_id
+        if pid is None:
+            async with get_session() as session:
+                r = await session.execute(text("SELECT id FROM projects ORDER BY id ASC LIMIT 1"))
+                row = r.fetchone()
+                pid = row[0] if row else None
+        if pid is None:
+            return (DEFAULT_COST_QUALITY_BIAS, DEFAULT_SPEED_QUALITY_BIAS)
+
+        async with get_session() as session:
+            r = await session.execute(
+                text("""
+                    SELECT cost_quality_bias, speed_quality_bias
+                    FROM projects WHERE id = :pid
+                """),
+                {"pid": pid},
+            )
+            row = r.fetchone()
+        if row:
+            cost = row[0] if row[0] is not None else DEFAULT_COST_QUALITY_BIAS
+            speed = row[1] if row[1] is not None else DEFAULT_SPEED_QUALITY_BIAS
+            return (float(cost), float(speed))
+    except Exception as e:
+        log.debug("Could not load routing preferences: %r", e)
+    return (DEFAULT_COST_QUALITY_BIAS, DEFAULT_SPEED_QUALITY_BIAS)
 
 
 async def update_project_config(project_id: int, config_updates: Dict[str, Any]) -> bool:
