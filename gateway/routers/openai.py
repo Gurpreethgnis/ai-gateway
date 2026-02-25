@@ -932,10 +932,7 @@ async def openai_chat_completions(req: Request):
                             f"{local_attempt}\n"
                             "[End local attempt summary]"
                         ).strip()
-<<<<<<< HEAD
 
-=======
->>>>>>> 07e2f38 (Resolve dashboard and OpenAI merge conflicts)
                 # No local response, use decision for provider routing
                 if decision.provider == "ollama":
                     # This shouldn't happen (cascade should have returned local_response)
@@ -1360,73 +1357,7 @@ async def openai_chat_completions(req: Request):
             or getattr(stream_provider, "name", "") == "anthropic"
             or (model_info and model_info.provider == "anthropic")
         )
-<<<<<<< HEAD
         if use_anthropic_stream and client is None:
-=======
-
-        await emit_request(
-            cf_ray=ray,
-            project_id=str(project_id) if project_id else None,
-            model=model,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cost_usd=cost,
-            latency_ms=dt_ms,
-            cached=False,
-            status_code=200,
-            has_tools=bool(provider_tools),
-            stream=False,
-        )
-
-        asyncio.create_task(record_usage_to_db(
-            project_id,
-            model,
-            input_tokens,
-            output_tokens,
-            ray,
-            False,
-            int(provider_resp.cache_read_tokens or 0),
-            int(provider_resp.cache_creation_tokens or 0),
-            gateway_tokens_saved,
-        ))
-
-        finish_reason = "tool_calls" if tool_calls else (provider_resp.finish_reason or "stop")
-        message_obj: Dict[str, Any] = {"role": "assistant", "content": out_text}
-        if tool_calls:
-            message_obj["tool_calls"] = tool_calls
-
-        resp_json = {
-            "id": f"chatcmpl_{hashlib.sha1((ray + str(time.time())).encode()).hexdigest()[:16]}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": with_model_prefix(model),
-            "choices": [{"index": 0, "message": message_obj, "finish_reason": finish_reason}],
-            "usage": _normalize_usage_for_openai(usage, selected_provider),
-        }
-
-        response = JSONResponse(content=resp_json)
-        response.headers["X-Gateway"] = "claude-gateway"
-        response.headers["X-Model-Source"] = "custom"
-        response.headers["X-Cache"] = "MISS"
-        response.headers["X-Reduction"] = "1"
-
-        if session_id and out_text:
-            asyncio.create_task(
-                persist_session_turn(
-                    session_id=session_id,
-                    input_messages=parsed.get("messages", []),
-                    assistant_content=out_text,
-                    system_prompt=system_text,
-                    last_provider=selected_provider,
-                    last_model=model,
-                )
-            )
-
-        return response
-
-    if is_stream:
-        if client is None:
->>>>>>> 07e2f38 (Resolve dashboard and OpenAI merge conflicts)
             raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set")
 
         include_usage = False

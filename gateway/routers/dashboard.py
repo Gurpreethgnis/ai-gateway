@@ -389,11 +389,7 @@ DASHBOARD_HTML = """
                 warning.style.display = 'none';
                 warning.textContent = '';
             }
-<<<<<<< HEAD
 
->>>>>>> 6869e71 (Close stage gaps and provider routing)
-=======
->>>>>>> 07e2f38 (Resolve dashboard and OpenAI merge conflicts)
             async function savePreferences() {
                 const prefs = {
                     cost_quality_bias: document.getElementById('cost-quality').value / 100,
