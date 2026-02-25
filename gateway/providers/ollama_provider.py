@@ -13,6 +13,7 @@ from typing import List, Dict, Any, AsyncIterator, Optional
 
 import httpx
 
+from gateway.canonical_format import CanonicalMessage, canonical_to_text_messages, to_canonical_messages
 from gateway.providers.base import BaseProvider, CompletionResponse, StreamChunk
 from gateway.logging_setup import log
 from gateway import config
@@ -31,6 +32,7 @@ class OllamaProvider(BaseProvider):
         self.cf_client_secret = getattr(config, "LOCAL_CF_ACCESS_CLIENT_SECRET", None)
         
         self.timeout = getattr(config, "LOCAL_LLM_TIMEOUT_SECONDS", 120)
+        self.keep_alive = getattr(config, "OLLAMA_KEEP_ALIVE", "10m")
         self._discovered_models: List[str] = []
     
     @property
@@ -56,6 +58,28 @@ class OllamaProvider(BaseProvider):
         # Some Ollama models support vision (llava, etc.)
         # but we conservatively return False for routing purposes
         return False
+
+    def _validate_model_allowed(self, model: str):
+        """Validate model against configured local allowlist."""
+        allowlist = getattr(config, "LOCAL_LLM_MODEL_ALLOWLIST", []) or []
+        if allowlist and model not in allowlist:
+            raise ValueError(f"Model '{model}' is not in LOCAL_LLM_MODEL_ALLOWLIST")
+
+    def _resolve_num_ctx(self, model: str, explicit_num_ctx: Optional[int] = None) -> int:
+        """Resolve context window to send to Ollama num_ctx."""
+        if isinstance(explicit_num_ctx, int) and explicit_num_ctx > 0:
+            return explicit_num_ctx
+
+        try:
+            from gateway.model_registry import get_model_registry
+            registry = get_model_registry()
+            model_info = registry.get_model(f"ollama/{model}")
+            if model_info and getattr(model_info, "context_window", 0):
+                return int(model_info.context_window)
+        except Exception:
+            pass
+
+        return 32768
     
     def get_models(self) -> List[str]:
         """Return discovered models with ollama/ prefix."""
@@ -146,6 +170,9 @@ class OllamaProvider(BaseProvider):
         """Non-streaming completion using Ollama API."""
         
         model_id = self.normalize_model_id(model)
+        self._validate_model_allowed(model_id)
+        num_ctx = self._resolve_num_ctx(model_id, kwargs.get("num_ctx"))
+        keep_alive = kwargs.get("keep_alive") or self.keep_alive
         
         # Build messages with system prompt
         ollama_messages = []
@@ -157,9 +184,11 @@ class OllamaProvider(BaseProvider):
             "model": model_id,
             "messages": ollama_messages,
             "stream": False,
+            "keep_alive": keep_alive,
             "options": {
                 "temperature": temperature,
                 "num_predict": max_tokens,
+                "num_ctx": num_ctx,
             },
         }
         
@@ -211,6 +240,9 @@ class OllamaProvider(BaseProvider):
         """Streaming completion using Ollama API."""
         
         model_id = self.normalize_model_id(model)
+        self._validate_model_allowed(model_id)
+        num_ctx = self._resolve_num_ctx(model_id, kwargs.get("num_ctx"))
+        keep_alive = kwargs.get("keep_alive") or self.keep_alive
         
         ollama_messages = []
         if system:
@@ -221,9 +253,11 @@ class OllamaProvider(BaseProvider):
             "model": model_id,
             "messages": ollama_messages,
             "stream": True,
+            "keep_alive": keep_alive,
             "options": {
                 "temperature": temperature,
                 "num_predict": max_tokens,
+                "num_ctx": num_ctx,
             },
         }
         
@@ -311,3 +345,31 @@ class OllamaProvider(BaseProvider):
             })
         
         return normalized
+
+    def to_canonical(self, messages: List[Dict[str, Any]]) -> List[CanonicalMessage]:
+        """Convert request messages to canonical format."""
+        return to_canonical_messages(messages)
+
+    def from_canonical(self, messages: List[CanonicalMessage]) -> List[Dict[str, Any]]:
+        """Convert canonical messages to Ollama-safe text messages."""
+        return canonical_to_text_messages(messages, include_tool_results=True, include_tool_use=False)
+
+    async def ensure_model_loaded(self, model: str, keep_alive: Optional[str] = None) -> bool:
+        """Warm up a model to reduce first-token latency."""
+        model_id = self.normalize_model_id(model)
+        self._validate_model_allowed(model_id)
+
+        payload = {
+            "model": model_id,
+            "prompt": "",
+            "stream": False,
+            "keep_alive": keep_alive or self.keep_alive,
+        }
+
+        url = f"{self.base_url.rstrip('/')}/api/generate"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(url, json=payload, headers=self._build_headers())
+                return resp.status_code == 200
+        except Exception:
+            return False

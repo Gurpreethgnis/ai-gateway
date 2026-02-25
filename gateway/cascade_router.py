@@ -28,6 +28,7 @@ async def route_with_cascade(
     explicit_model: Optional[str] = None,
     cost_quality_bias: Optional[float] = None,
     speed_quality_bias: Optional[float] = None,
+    session_id: Optional[str] = None,
 ) -> Tuple[Any, Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """
     Route with cascade: try preferred model first, escalate if quality check fails.
@@ -79,11 +80,13 @@ async def route_with_cascade(
     
     cascade_metadata = {
         "cascade_enabled": True,
+        "session_id": session_id,
         "initial_model": initial_decision.primary_model,
         "initial_provider": initial_decision.provider,
         "initial_score": initial_decision.scores.get(initial_decision.primary_model, 0),
         "escalated": False,
         "escalation_reason": None,
+        "local_attempt_content": None,
         "local_response_time_ms": None,
         "quality_score": None,
         "total_cascade_time_ms": None,
@@ -113,6 +116,7 @@ async def route_with_cascade(
         if not local_response or "error" in local_response:
             # Local call failed, get next best model
             log.warning("Cascade: local call failed, escalating")
+            cascade_metadata["local_attempt_content"] = (local_response or {}).get("content")
             escalated_decision = await _get_escalation_decision(
                 messages, tools, system_prompt,
                 exclude_provider="ollama",
@@ -148,6 +152,7 @@ async def route_with_cascade(
             "Cascade: local quality failed (score=%.2f, reason=%s), escalating",
             quality_score, fail_reason
         )
+        cascade_metadata["local_attempt_content"] = response_text[:1200] if response_text else None
         escalated_decision = await _get_escalation_decision(
             messages, tools, system_prompt,
             exclude_provider="ollama",
@@ -279,6 +284,10 @@ async def _call_local_for_cascade(
         
         # Call Ollama via provider
         provider = OllamaProvider()
+        try:
+            await provider.ensure_model_loaded(model or LOCAL_LLM_DEFAULT_MODEL)
+        except Exception:
+            pass
         response = await provider.complete(
             messages=processed_messages,
             model=model or LOCAL_LLM_DEFAULT_MODEL,

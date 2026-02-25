@@ -4,6 +4,7 @@ Groq Provider - Fast inference API integration.
 
 from typing import List, Dict, Any, AsyncIterator, Optional
 
+from gateway.canonical_format import CanonicalMessage, canonical_to_text_messages, to_canonical_messages
 from gateway.providers.base import BaseProvider, CompletionResponse, StreamChunk
 from gateway.logging_setup import log
 from gateway import config
@@ -226,3 +227,11 @@ class GroqProvider(BaseProvider):
             })
         
         return normalized
+
+    def to_canonical(self, messages: List[Dict[str, Any]]) -> List[CanonicalMessage]:
+        """Convert request messages to canonical format."""
+        return to_canonical_messages(messages)
+
+    def from_canonical(self, messages: List[CanonicalMessage]) -> List[Dict[str, Any]]:
+        """Convert canonical messages to Groq-safe text messages."""
+        return canonical_to_text_messages(messages, include_tool_results=True, include_tool_use=True)

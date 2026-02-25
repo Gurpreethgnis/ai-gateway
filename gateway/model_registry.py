@@ -447,10 +447,17 @@ class ModelRegistry:
         ollama_url = getattr(config, "OLLAMA_URL", None) or getattr(config, "LOCAL_LLM_URL", None)
         if not ollama_url:
             return
+
+        headers = {}
+        cf_client_id = getattr(config, "LOCAL_CF_ACCESS_CLIENT_ID", None)
+        cf_client_secret = getattr(config, "LOCAL_CF_ACCESS_CLIENT_SECRET", None)
+        if cf_client_id and cf_client_secret:
+            headers["CF-Access-Client-Id"] = cf_client_id
+            headers["CF-Access-Client-Secret"] = cf_client_secret
         
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(f"{ollama_url}/api/tags")
+                resp = await client.get(f"{ollama_url}/api/tags", headers=headers)
                 if resp.status_code == 200:
                     data = resp.json()
                     for model in data.get("models", []):

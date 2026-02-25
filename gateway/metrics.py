@@ -101,6 +101,18 @@ if PROMETHEUS_AVAILABLE and PROMETHEUS_ENABLED:
         ["type", "model", "project"],  # type: read or write
     )
 
+    PROVIDER_CACHE_EVENTS = Counter(
+        "gateway_provider_cache_events_total",
+        "Provider cache events by provider/cache_type/hit",
+        ["provider", "cache_type", "hit"],
+    )
+
+    PROVIDER_CACHE_TOKENS = Counter(
+        "gateway_provider_cache_tokens_total",
+        "Provider cache token accounting",
+        ["provider", "cache_type"],
+    )
+
     GATEWAY_INFO = Info(
         "gateway",
         "Gateway information",
@@ -141,6 +153,8 @@ else:
     STREAM_DURATION = DummyMetric()
     TOKENS_SAVED = DummyMetric()
     PROMPT_CACHE_TOKENS = DummyMetric()
+    PROVIDER_CACHE_EVENTS = DummyMetric()
+    PROVIDER_CACHE_TOKENS = DummyMetric()
     GATEWAY_INFO = DummyMetric()
 
 
@@ -247,6 +261,15 @@ def record_prompt_cache_tokens(cache_type: str, model: str, project: str, tokens
     """
     project = project or "default"
     PROMPT_CACHE_TOKENS.labels(type=cache_type, model=model, project=project).inc(tokens)
+
+
+def record_provider_cache_event(provider: str, cache_type: str, hit: bool, tokens: int = 0):
+    """Record provider-specific cache event and optional token usage."""
+    provider = provider or "unknown"
+    cache_type = cache_type or "unknown"
+    PROVIDER_CACHE_EVENTS.labels(provider=provider, cache_type=cache_type, hit="1" if hit else "0").inc()
+    if tokens > 0:
+        PROVIDER_CACHE_TOKENS.labels(provider=provider, cache_type=cache_type).inc(tokens)
 
 
 def get_metrics_output() -> bytes:

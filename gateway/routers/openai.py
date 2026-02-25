@@ -30,7 +30,7 @@ from gateway.config import (
 )
 from gateway.logging_setup import log
 from gateway.routing import route_model_from_messages, with_model_prefix, strip_model_prefix, VALID_ANTHROPIC_MODELS, get_fallback_model
-from gateway.cache import cache_key, cache_get, cache_set
+from gateway.cache import cache_get, cache_set
 from gateway.anthropic_client import (
     client,
     call_anthropic_with_timeout,
@@ -65,11 +65,59 @@ from gateway.metrics import (
     record_upstream_error,
     increment_active_requests,
     decrement_active_requests,
+    record_provider_cache_event,
 )
+from gateway.response_cache import compute_response_cache_key
+from gateway.prompt_cache_strategy import (
+    apply_anthropic_prompt_cache_strategy,
+    classify_model_tier,
+    infer_provider_from_model,
+)
+from gateway.session_context import merge_session_context, persist_session_turn
+from gateway.routing_trace import record_routing_trace_event
 from gateway.telemetry import emit_error, emit_request
 from gateway.db import calculate_cost, record_usage_to_db
 
 router = APIRouter()
+
+
+def _normalize_usage_for_openai(usage: Optional[Dict[str, Any]], provider: str) -> Optional[Dict[str, Any]]:
+    """Normalize provider-specific usage payloads to OpenAI-compatible usage fields."""
+    if not usage:
+        return None
+
+    if usage.get("prompt_tokens") is not None:
+        return {
+            "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+            "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+            "total_tokens": int(usage.get("total_tokens", 0) or 0),
+            **({"prompt_tokens_details": usage.get("prompt_tokens_details")} if usage.get("prompt_tokens_details") else {}),
+        }
+
+    if provider == "anthropic":
+        return anthropic_to_openai_usage(usage)
+
+    input_tokens = int(usage.get("input_tokens", 0) or 0)
+    output_tokens = int(usage.get("output_tokens", 0) or 0)
+    return {
+        "prompt_tokens": input_tokens,
+        "completion_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
+def _extract_response_text(result: Dict[str, Any]) -> str:
+    """Extract assistant text from an OpenAI-style response payload."""
+    try:
+        choices = result.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            message = choices[0].get("message") or {}
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+    except Exception:
+        pass
+    return ""
 
 
 def is_local_provider_request(parsed: Dict[str, Any]) -> bool:
@@ -80,6 +128,8 @@ def is_local_provider_request(parsed: Dict[str, Any]) -> bool:
     
     model = parsed.get("model") or ""
     if model.startswith("local:") or model.startswith("ollama:"):
+        return True
+    if model and infer_provider_from_model(model) == "ollama":
         return True
     
     return False
@@ -101,7 +151,11 @@ async def handle_local_provider(
     parsed: Dict[str, Any],
     ray: str,
     t0: float,
-) -> JSONResponse:
+    session_id: Optional[str] = None,
+    input_messages: Optional[List[Dict[str, Any]]] = None,
+    system_prompt: str = "",
+    route_type: str = "explicit_local",
+) -> Any:
     """Handle request via local Ollama provider and return OpenAI-formatted response."""
     from gateway.providers.ollama import call_ollama_openai_format, validate_local_model
     import hashlib
@@ -145,6 +199,69 @@ async def handle_local_provider(
         "OA LOCAL OK (cf-ray=%s) model=%s ms=%d",
         ray, resolved_model, dt_ms
     )
+
+    result_text = _extract_response_text(result)
+    if session_id and result_text:
+        asyncio.create_task(
+            persist_session_turn(
+                session_id=session_id,
+                input_messages=input_messages or parsed.get("messages", []),
+                assistant_content=result_text,
+                system_prompt=system_prompt,
+                last_provider="ollama",
+                last_model=resolved_model,
+            )
+        )
+
+    asyncio.create_task(
+        record_routing_trace_event(
+            {
+                "route_type": route_type,
+                "provider": "ollama",
+                "model": resolved_model,
+                "session_id": session_id or None,
+                "stream": bool(parsed.get("stream", False)),
+            }
+        )
+    )
+
+    if parsed.get("stream", False):
+        from gateway.context_pruner import estimate_messages_tokens
+
+        local_usage = result.get("usage") or {
+            "prompt_tokens": estimate_messages_tokens(parsed.get("messages", [])),
+            "completion_tokens": len(result_text) // 4,
+            "total_tokens": estimate_messages_tokens(parsed.get("messages", [])) + len(result_text) // 4,
+        }
+        chunk_id = f"chatcmpl-{hashlib.sha1((ray + str(time.time())).encode()).hexdigest()[:16]}"
+        created = int(time.time())
+
+        async def _local_sse():
+            content_chunk = {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": with_model_prefix(result.get("model") or resolved_model),
+                "choices": [{"index": 0, "delta": {"content": result_text}, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(content_chunk, ensure_ascii=False)}\\n\\n"
+
+            final_chunk = {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": with_model_prefix(result.get("model") or resolved_model),
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": local_usage,
+            }
+            yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\\n\\n"
+            yield "data: [DONE]\\n\\n"
+
+        return StreamingResponse(
+            _local_sse(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
     
     response = JSONResponse(content=result)
     response.headers["X-Gateway"] = "claude-gateway"
@@ -291,6 +408,7 @@ async def openai_chat_completions(req: Request):
         parsed = {}
 
     parsed = normalize_request_body(parsed)
+    session_id = (req.headers.get("x-session-id") or "").strip()
 
     if "messages" not in parsed or not parsed["messages"]:
         raise HTTPException(
@@ -301,6 +419,16 @@ async def openai_chat_completions(req: Request):
     if len(raw) > MAX_BODY_BYTES:
         raise HTTPException(status_code=413, detail="Payload too large")
 
+    if session_id:
+        merged_messages, merged_system = await merge_session_context(
+            session_id=session_id,
+            incoming_messages=parsed.get("messages", []),
+            incoming_system_prompt=str(parsed.get("system") or ""),
+        )
+        parsed["messages"] = merged_messages
+        if merged_system and not parsed.get("system"):
+            parsed["system"] = merged_system
+
     ray = req.headers.get("cf-ray") or ""
     t0 = time.time()
 
@@ -310,7 +438,15 @@ async def openai_chat_completions(req: Request):
         parsed["provider"] = "local"
 
     if is_local_provider_request(parsed):
-        return await handle_local_provider(parsed, ray, t0)
+        return await handle_local_provider(
+            parsed,
+            ray,
+            t0,
+            session_id=session_id,
+            input_messages=parsed.get("messages", []),
+            system_prompt=str(parsed.get("system") or ""),
+            route_type="explicit_local",
+        )
 
     project_id, project_name, rate_limit_rpm = await get_project_context(req)
 
@@ -679,7 +815,7 @@ async def openai_chat_completions(req: Request):
             if ENABLE_CASCADE_ROUTING:
                 # Use cascade routing
                 decision, local_response, cascade_metadata = await route_with_cascade(
-                    aa_messages, aa_tools, project_id, system_text, request_model
+                    aa_messages, aa_tools, project_id, system_text, session_id=session_id, explicit_model=request_model
                 )
                 
                 # If cascade returned a valid local response, return it immediately
@@ -715,6 +851,31 @@ async def openai_chat_completions(req: Request):
                     local_model_id = local_response.get("model") or LOCAL_LLM_DEFAULT_MODEL
                     if isinstance(local_model_id, str) and local_model_id.startswith("local:"):
                         local_model_id = local_model_id.replace("local:", "", 1)
+
+                    if session_id and local_content:
+                        asyncio.create_task(
+                            persist_session_turn(
+                                session_id=session_id,
+                                input_messages=parsed.get("messages", []),
+                                assistant_content=local_content,
+                                system_prompt=system_text,
+                                last_provider="ollama",
+                                last_model=local_model_id,
+                            )
+                        )
+
+                    asyncio.create_task(
+                        record_routing_trace_event(
+                            {
+                                "route_type": "cascade_local_return",
+                                "provider": "ollama",
+                                "model": local_model_id,
+                                "session_id": session_id or None,
+                                "escalated": False,
+                                "quality_score": (cascade_metadata or {}).get("quality_score"),
+                            }
+                        )
+                    )
                     
                     # If client requested streaming, return SSE so Cursor/IDE gets expected format
                     if parsed.get("stream", False):
@@ -762,6 +923,16 @@ async def openai_chat_completions(req: Request):
                         resp.headers["X-Gateway-Project-Id"] = ""
                     return resp
 
+                if cascade_metadata and cascade_metadata.get("escalated") and cascade_metadata.get("local_attempt_content"):
+                    local_attempt = str(cascade_metadata.get("local_attempt_content") or "")[:1200]
+                    if local_attempt:
+                        system_text = (
+                            f"{system_text}\n\n"
+                            "[Previous local model attempt summary]\n"
+                            f"{local_attempt}\n"
+                            "[End local attempt summary]"
+                        ).strip()
+
                 # No local response, use decision for provider routing
                 if decision.provider == "ollama":
                     # This shouldn't happen (cascade should have returned local_response)
@@ -775,8 +946,20 @@ async def openai_chat_completions(req: Request):
                 
                 # If routed to local provider, handle via local provider
                 if decision.provider == "local":
-                    log.info("OA smart routing -> LOCAL (tier=%s, phase=%s)", getattr(decision, "tier", "local"), getattr(decision, "phase", ""))
-                    return await handle_local_provider(parsed, ray, t0)
+                    log.info(
+                        "OA smart routing -> LOCAL (tier=%s, phase=%s)",
+                        getattr(decision, "tier", "local"),
+                        getattr(decision, "phase", ""),
+                    )
+                    return await handle_local_provider(
+                        parsed,
+                        ray,
+                        t0,
+                        session_id=session_id,
+                        input_messages=parsed.get("messages", []),
+                        system_prompt=system_text,
+                        route_type="smart_route_local",
+                    )
                 
                 # Otherwise use selected model (may be Anthropic, Gemini, Groq, etc.)
                 model = decision.primary_model
@@ -790,10 +973,30 @@ async def openai_chat_completions(req: Request):
     max_tokens = int(parsed.get("max_tokens") or DEFAULT_MAX_TOKENS)
     temperature = parsed.get("temperature") if parsed.get("temperature") is not None else 0.2
 
+    asyncio.create_task(
+        record_routing_trace_event(
+            {
+                "route_type": "selected_model",
+                "provider": infer_provider_from_model(model),
+                "model": model,
+                "session_id": session_id or None,
+                "smart_routing": bool(use_smart_routing),
+                "cascade_enabled": bool((cascade_metadata or {}).get("cascade_enabled")),
+                "escalated": bool((cascade_metadata or {}).get("escalated")),
+                "escalation_reason": (cascade_metadata or {}).get("escalation_reason"),
+            }
+        )
+    )
+
     if ENABLE_CONTEXT_PRUNING:
         try:
             from gateway.context_pruner import prune_context
-            aa_messages, prune_meta = await prune_context(aa_messages, system_text=system_text)
+            aa_messages, prune_meta = await prune_context(
+                aa_messages,
+                system_text=system_text,
+                provider=infer_provider_from_model(model),
+                model=model,
+            )
             if prune_meta.get("pruned"):
                 gateway_tokens_saved += prune_meta.get("tokens_saved", 0)
                 log.debug("Context pruned: %s", prune_meta)
@@ -829,55 +1032,80 @@ async def openai_chat_completions(req: Request):
         return msgs
 
     aa_messages = drop_leading_tool_result_only_messages(aa_messages)
+    selected_provider = infer_provider_from_model(model)
+    if selected_provider == "local":
+        selected_provider = "ollama"
 
-    # When caching is enabled and system prompt is long (>= 1024 chars), prepend cacheable constitution
-    # + diff rules for 60–80% prompt-cache savings, then append the client's system text.
-    if ENABLE_ANTHROPIC_CACHE_CONTROL and system_text and len(system_text) >= 1024:
-        from gateway.platform_constitution import get_cacheable_system_blocks
-        system_blocks = get_cacheable_system_blocks(include_constitution=True, include_diff_rules=True)
-        system_blocks.append({"type": "text", "text": system_text})
-        system_param = system_blocks
-    else:
-        system_param = system_text
+    provider_instance = None
+    provider_messages: List[Dict[str, Any]] = aa_messages
+    try:
+        from gateway.providers.registry import initialize_provider_registry
 
-    if ENABLE_ANTHROPIC_CACHE_CONTROL and aa_messages:
-        # Anthropic allows up to 4 checkpoints. 1-2 used for system blocks.
-        # Use remaining checkpoints for recent user messages to capture growing context.
-        user_msgs_indices = [i for i, m in enumerate(aa_messages) if m.get("role") == "user"]
-        for idx in user_msgs_indices[-2:]:
-            msg = aa_messages[idx]
-            content = msg.get("content")
-            if isinstance(content, str):
-                if len(content) > 2048:  # Only cache substantial messages
-                    msg["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
-            elif isinstance(content, list) and content:
-                # Add cache control to the last block of the message
-                last_block = content[-1]
-                if isinstance(last_block, dict) and last_block.get("type") == "text":
-                    text_len = len(last_block.get("text", ""))
-                    if text_len > 2048:  # Only cache substantial content
-                        last_block["cache_control"] = {"type": "ephemeral"}
+        registry = await initialize_provider_registry()
+        provider_instance = registry.get(selected_provider) if selected_provider != "unknown" else None
+        if provider_instance is None:
+            provider_instance = registry.get_for_model(model)
+            if provider_instance:
+                selected_provider = provider_instance.name
+
+        if provider_instance is not None:
+            canonical_messages = provider_instance.to_canonical(aa_messages)
+            provider_messages = provider_instance.from_canonical(canonical_messages)
+    except Exception as e:
+        log.warning("Provider adapter canonicalization failed: %r", e)
+
+    system_param: Any = system_text
+    provider_tools: List[Dict[str, Any]] = oa_tools
+
+    if selected_provider == "anthropic":
+        system_param, provider_messages = apply_anthropic_prompt_cache_strategy(
+            system_text,
+            provider_messages,
+            enable_cache_control=ENABLE_ANTHROPIC_CACHE_CONTROL,
+        )
+        provider_tools = aa_tools
 
     payload: Dict[str, Any] = {
         "model": model,
         "system": system_param,
-        "messages": aa_messages,
+        "messages": provider_messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
-    if aa_tools:
-        payload["tools"] = aa_tools
-        if aa_tool_choice:
+    if provider_tools:
+        payload["tools"] = provider_tools
+        if selected_provider == "anthropic" and aa_tool_choice:
             payload["tool_choice"] = aa_tool_choice
 
     do_cache = temperature <= 0.3 and not req.headers.get("X-No-Cache")
-    key = cache_key(payload) if do_cache else None
+    model_tier = classify_model_tier(model)
+    key = compute_response_cache_key(
+        messages=provider_messages,
+        model=model,
+        system=system_text,
+        tools=provider_tools,
+        temperature=float(temperature),
+        model_tier=model_tier,
+    ) if do_cache else None
+    cache_provider = infer_provider_from_model(model)
 
     if key:
         cached = cache_get(key)
         if cached and isinstance(cached, dict) and "text" in cached and cached.get("tool_calls") is None:
+            record_provider_cache_event(cache_provider, "response", True)
             out_text = cached.get("text", "")
             usage_cached = cached.get("usage")
+            if session_id and out_text:
+                asyncio.create_task(
+                    persist_session_turn(
+                        session_id=session_id,
+                        input_messages=parsed.get("messages", []),
+                        assistant_content=out_text,
+                        system_prompt=system_text,
+                        last_provider=cache_provider,
+                        last_model=model,
+                    )
+                )
             resp_json = {
                 "id": f"chatcmpl_cached_{key[:12]}",
                 "object": "chat.completion",
@@ -886,7 +1114,7 @@ async def openai_chat_completions(req: Request):
                 "choices": [
                     {"index": 0, "message": {"role": "assistant", "content": out_text}, "finish_reason": "stop"}
                 ],
-                "usage": anthropic_to_openai_usage(usage_cached),
+                "usage": _normalize_usage_for_openai(usage_cached, cache_provider),
             }
 
             dt_ms = int((time.time() - t0) * 1000)
@@ -898,8 +1126,226 @@ async def openai_chat_completions(req: Request):
             response.headers["X-Cache"] = "HIT"
             response.headers["X-Reduction"] = "1"
             return response
+        record_provider_cache_event(cache_provider, "response", False)
 
     is_stream = parsed.get("stream", False)
+
+    if selected_provider != "anthropic" and provider_instance is not None:
+        if is_stream:
+            async def provider_sse_stream():
+                stream_t0 = time.time()
+                stream_text_parts: List[str] = []
+                chunk_id = f"chatcmpl_{hashlib.sha1((ray + str(time.time())).encode()).hexdigest()[:16]}"
+                created = int(time.time())
+
+                increment_active_requests(model)
+                try:
+                    async for chunk in provider_instance.stream(
+                        messages=provider_messages,
+                        model=model,
+                        system=system_text,
+                        tools=provider_tools,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    ):
+                        if chunk.content:
+                            stream_text_parts.append(chunk.content)
+                            event = {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": with_model_prefix(model),
+                                "choices": [{"index": 0, "delta": {"content": chunk.content}}],
+                            }
+                            yield f"data: {json.dumps(event, ensure_ascii=False)}\\n\\n"
+
+                        if chunk.tool_calls:
+                            event = {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": with_model_prefix(model),
+                                "choices": [{"index": 0, "delta": {"tool_calls": chunk.tool_calls}}],
+                            }
+                            yield f"data: {json.dumps(event, ensure_ascii=False)}\\n\\n"
+
+                        if chunk.is_final:
+                            finish_reason = chunk.finish_reason or "stop"
+                            final_chunk = {
+                                "id": chunk_id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": with_model_prefix(model),
+                                "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+                            }
+                            yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\\n\\n"
+                            break
+
+                    yield "data: [DONE]\\n\\n"
+
+                    final_stream_text = "".join(stream_text_parts).strip()
+                    if session_id and final_stream_text:
+                        asyncio.create_task(
+                            persist_session_turn(
+                                session_id=session_id,
+                                input_messages=parsed.get("messages", []),
+                                assistant_content=final_stream_text,
+                                system_prompt=system_text,
+                                last_provider=selected_provider,
+                                last_model=model,
+                            )
+                        )
+
+                    asyncio.create_task(
+                        record_routing_trace_event(
+                            {
+                                "route_type": "stream_completed",
+                                "provider": selected_provider,
+                                "model": model,
+                                "session_id": session_id or None,
+                                "stream": True,
+                            }
+                        )
+                    )
+
+                    dt_ms = int((time.time() - stream_t0) * 1000)
+                    record_stream_duration(model, project_name or "default", dt_ms / 1000.0)
+                    record_request(model, project_name or "default", 200, "/v1/chat/completions", dt_ms / 1000.0)
+                except Exception as e:
+                    record_upstream_error(model, "stream_error", 500)
+                    log.warning("Provider stream failed for %s: %r", selected_provider, e)
+                    err_chunk = {
+                        "id": chunk_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": with_model_prefix(model),
+                        "choices": [{"index": 0, "delta": {"content": f"\\n\\n[Upstream Error: {str(e)}]"}, "finish_reason": "stop"}],
+                    }
+                    yield f"data: {json.dumps(err_chunk, ensure_ascii=False)}\\n\\n"
+                    yield "data: [DONE]\\n\\n"
+                finally:
+                    decrement_active_requests(model)
+
+            response = StreamingResponse(provider_sse_stream(), media_type="text/event-stream")
+            response.headers["Cache-Control"] = "no-cache"
+            response.headers["Connection"] = "keep-alive"
+            response.headers["X-Accel-Buffering"] = "no"
+            response.headers["X-Gateway"] = "claude-gateway"
+            response.headers["X-Model-Source"] = "custom"
+            response.headers["X-Cache"] = "MISS"
+            response.headers["X-Reduction"] = "1"
+            return response
+
+        increment_active_requests(model)
+        try:
+            provider_resp = await provider_instance.complete(
+                messages=provider_messages,
+                model=model,
+                system=system_text,
+                tools=provider_tools,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+        except Exception as e:
+            decrement_active_requests(model)
+            await emit_error(
+                "upstream_error", str(e), cf_ray=ray, model=model,
+                project_id=str(project_id) if project_id else None,
+                exception=e,
+            )
+            raise HTTPException(status_code=502, detail="Upstream model error")
+
+        decrement_active_requests(model)
+
+        out_text = provider_resp.content or ""
+        tool_calls = list(provider_resp.tool_calls or [])
+        usage = {
+            "input_tokens": int(provider_resp.input_tokens or 0),
+            "output_tokens": int(provider_resp.output_tokens or 0),
+            "cache_read_input_tokens": int(provider_resp.cache_read_tokens or 0),
+            "cache_creation_input_tokens": int(provider_resp.cache_creation_tokens or 0),
+        }
+
+        cache_blob = {
+            "cached": False,
+            "model": model,
+            "text": out_text,
+            "usage": usage,
+            "tool_calls": (tool_calls or None),
+        }
+        if key and not tool_calls:
+            cache_set(key, cache_blob, CACHE_TTL_SECONDS)
+
+        dt_ms = int((time.time() - t0) * 1000)
+        input_tokens = int(provider_resp.input_tokens or 0)
+        output_tokens = int(provider_resp.output_tokens or 0)
+        cost = calculate_cost(model, input_tokens, output_tokens)
+
+        record_request(
+            model, project_name or "default", 200, "/v1/chat/completions", dt_ms / 1000.0,
+            input_tokens=input_tokens, output_tokens=output_tokens, cost_usd=cost,
+        )
+
+        await emit_request(
+            cf_ray=ray,
+            project_id=str(project_id) if project_id else None,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost,
+            latency_ms=dt_ms,
+            cached=False,
+            status_code=200,
+            has_tools=bool(provider_tools),
+            stream=False,
+        )
+
+        asyncio.create_task(record_usage_to_db(
+            project_id,
+            model,
+            input_tokens,
+            output_tokens,
+            ray,
+            False,
+            int(provider_resp.cache_read_tokens or 0),
+            int(provider_resp.cache_creation_tokens or 0),
+            gateway_tokens_saved,
+        ))
+
+        finish_reason = "tool_calls" if tool_calls else (provider_resp.finish_reason or "stop")
+        message_obj: Dict[str, Any] = {"role": "assistant", "content": out_text}
+        if tool_calls:
+            message_obj["tool_calls"] = tool_calls
+
+        resp_json = {
+            "id": f"chatcmpl_{hashlib.sha1((ray + str(time.time())).encode()).hexdigest()[:16]}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": with_model_prefix(model),
+            "choices": [{"index": 0, "message": message_obj, "finish_reason": finish_reason}],
+            "usage": _normalize_usage_for_openai(usage, selected_provider),
+        }
+
+        response = JSONResponse(content=resp_json)
+        response.headers["X-Gateway"] = "claude-gateway"
+        response.headers["X-Model-Source"] = "custom"
+        response.headers["X-Cache"] = "MISS"
+        response.headers["X-Reduction"] = "1"
+
+        if session_id and out_text:
+            asyncio.create_task(
+                persist_session_turn(
+                    session_id=session_id,
+                    input_messages=parsed.get("messages", []),
+                    assistant_content=out_text,
+                    system_prompt=system_text,
+                    last_provider=selected_provider,
+                    last_model=model,
+                )
+            )
+
+        return response
+
     if is_stream:
         # Resolve which provider will handle streaming (must match routed model, not always Anthropic)
         from gateway.providers.registry import get_provider_for_model
@@ -922,6 +1368,7 @@ async def openai_chat_completions(req: Request):
         async def sse_stream():
             nonlocal model
             stream_t0 = time.time()
+            streamed_text_parts: List[str] = []
             chunk_id = f"chatcmpl_{hashlib.sha1((ray + str(time.time())).encode()).hexdigest()[:16]}"
             created = int(time.time())
             q: asyncio.Queue = asyncio.Queue()
@@ -1133,6 +1580,8 @@ async def openai_chat_completions(req: Request):
                     continue
 
                 if kind == "text":
+                    if isinstance(payload_item, str) and payload_item:
+                        streamed_text_parts.append(payload_item)
                     event = {
                         "id": chunk_id,
                         "object": "chat.completion.chunk",
@@ -1179,7 +1628,7 @@ async def openai_chat_completions(req: Request):
                         "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
                     }
                     if include_usage and payload_item:
-                        final_chunk["usage"] = anthropic_to_openai_usage(payload_item)
+                        final_chunk["usage"] = _normalize_usage_for_openai(payload_item, selected_provider)
                     yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
                     yield "data: [DONE]\n\n"
 
@@ -1214,6 +1663,31 @@ async def openai_chat_completions(req: Request):
                         if cache_write_tokens > 0:
                             from gateway.metrics import record_prompt_cache_tokens
                             record_prompt_cache_tokens("write", model, project_name or "default", cache_write_tokens)
+
+                    final_stream_text = "".join(streamed_text_parts).strip()
+                    if session_id and final_stream_text:
+                        asyncio.create_task(
+                            persist_session_turn(
+                                session_id=session_id,
+                                input_messages=parsed.get("messages", []),
+                                assistant_content=final_stream_text,
+                                system_prompt=system_text,
+                                last_provider=infer_provider_from_model(model),
+                                last_model=model,
+                            )
+                        )
+
+                    asyncio.create_task(
+                        record_routing_trace_event(
+                            {
+                                "route_type": "stream_completed",
+                                "provider": infer_provider_from_model(model),
+                                "model": model,
+                                "session_id": session_id or None,
+                                "stream": True,
+                            }
+                        )
+                    )
 
                     finished = True
 
@@ -1417,7 +1891,7 @@ async def openai_chat_completions(req: Request):
         "created": int(time.time()),
         "model": with_model_prefix(model),
         "choices": [{"index": 0, "message": message_obj, "finish_reason": finish_reason}],
-        "usage": anthropic_to_openai_usage(usage),
+        "usage": _normalize_usage_for_openai(usage, selected_provider),
     }
 
     response = JSONResponse(content=resp_json)
@@ -1434,6 +1908,19 @@ async def openai_chat_completions(req: Request):
     cache_hit = usage and usage.get("cache_read_input_tokens", 0) > 0
     response.headers["X-Cache"] = "HIT" if cache_hit else "MISS"
     response.headers["X-Reduction"] = "1"
+
+    if session_id and out_text:
+        asyncio.create_task(
+            persist_session_turn(
+                session_id=session_id,
+                input_messages=parsed.get("messages", []),
+                assistant_content=out_text,
+                system_prompt=system_text,
+                last_provider=infer_provider_from_model(model),
+                last_model=model,
+            )
+        )
+
     return response
 
 

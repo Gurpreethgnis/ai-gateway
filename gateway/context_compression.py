@@ -8,10 +8,11 @@ Summarizes older messages when routing to local models with smaller context wind
 from typing import List, Dict, Any, Optional
 
 from gateway.logging_setup import log
+from gateway import config
 
 
 # Models used for compression (fast, small)
-COMPRESSION_MODEL = "ollama/llama3.1:8b"
+COMPRESSION_MODEL = getattr(config, "COMPRESSION_MODEL", "ollama/llama3.1:8b")
 
 
 async def compress_context_for_local(
@@ -67,8 +68,8 @@ async def compress_context_for_local(
             # Return compressed history
             return [
                 {
-                    "role": "system",
-                    "content": f"[Previous conversation summary: {summary}]",
+                    "role": "user",
+                    "content": f"[CONTEXT SUMMARY: {summary}]",
                 },
                 *recent,
             ]
@@ -108,8 +109,8 @@ Conversation:
 Summary (be brief, 2-3 sentences max):"""
     
     try:
-        # Use fast model for summarization
-        model = COMPRESSION_MODEL.split("/")[-1]  # Remove ollama/ prefix
+        # Use configured compression model
+        model = COMPRESSION_MODEL.split("/")[-1]  # Remove optional provider prefix
         
         response = await provider.complete(
             messages=[{"role": "user", "content": summary_prompt}],

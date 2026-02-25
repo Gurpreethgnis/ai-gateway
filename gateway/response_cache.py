@@ -9,9 +9,10 @@ import json
 import hashlib
 from typing import Dict, Any, Optional, List
 
-from gateway.cache import rds, cache_key
+from gateway.cache import rds
+from gateway.canonical_format import to_canonical_messages
 from gateway.logging_setup import log
-from gateway.metrics import record_cache_hit, record_cache_miss
+from gateway.metrics import record_cache_hit, record_cache_miss, record_provider_cache_event
 
 
 # Default TTL: 30 minutes
@@ -23,6 +24,8 @@ def compute_response_cache_key(
     model: str,
     system: Optional[str] = None,
     tools: Optional[List[Dict]] = None,
+    temperature: Optional[float] = None,
+    model_tier: Optional[str] = None,
 ) -> str:
     """
     Compute cache key for a request.
@@ -33,14 +36,36 @@ def compute_response_cache_key(
     - Model
     - Tools (if any)
     """
+    canonical = to_canonical_messages(messages)
+    canonical_payload = []
+    for msg in canonical:
+        canonical_payload.append({
+            "role": msg.role,
+            "content": [
+                {
+                    "type": block.type,
+                    "text": block.text,
+                    "mime_type": block.mime_type,
+                    "data_hash": hashlib.sha256((block.data or "").encode()).hexdigest() if block.data else None,
+                    "tool_name": block.tool_name,
+                    "tool_call_id": block.tool_call_id,
+                    "arguments": block.arguments,
+                }
+                for block in msg.content
+            ],
+        })
+
     key_data = {
         "system": system or "",
-        "messages": [
-            {"role": m.get("role"), "content": _normalize_content(m.get("content"))}
-            for m in messages
-        ],
+        "messages": canonical_payload,
         "model": model,
     }
+
+    if model_tier:
+        key_data["model_tier"] = model_tier
+
+    if temperature is not None:
+        key_data["temperature"] = float(temperature)
     
     if tools:
         # Sort tools for consistent hashing
@@ -76,6 +101,9 @@ async def check_response_cache(
     model: str,
     system: Optional[str] = None,
     tools: Optional[List[Dict]] = None,
+    temperature: Optional[float] = None,
+    model_tier: Optional[str] = None,
+    provider: str = "unknown",
 ) -> Optional[Dict]:
     """
     Check if an exact-match cached response exists.
@@ -87,15 +115,17 @@ async def check_response_cache(
         return None
     
     try:
-        key = compute_response_cache_key(messages, model, system, tools)
+        key = compute_response_cache_key(messages, model, system, tools, temperature=temperature, model_tier=model_tier)
         cached = rds.get(key)
         
         if cached:
             log.info("Response cache HIT: %s", key[:20])
             record_cache_hit("response")
+            record_provider_cache_event(provider=provider, cache_type="response", hit=True)
             return json.loads(cached)
         
         record_cache_miss("response")
+        record_provider_cache_event(provider=provider, cache_type="response", hit=False)
         return None
         
     except Exception as e:
@@ -110,6 +140,8 @@ async def store_response_cache(
     system: Optional[str] = None,
     tools: Optional[List[Dict]] = None,
     ttl: int = RESPONSE_CACHE_TTL,
+    temperature: Optional[float] = None,
+    model_tier: Optional[str] = None,
 ):
     """
     Store a response in the cache.
@@ -129,7 +161,7 @@ async def store_response_cache(
         return
     
     try:
-        key = compute_response_cache_key(messages, model, system, tools)
+        key = compute_response_cache_key(messages, model, system, tools, temperature=temperature, model_tier=model_tier)
         
         # Store minimal response data
         cache_data = {

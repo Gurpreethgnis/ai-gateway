@@ -9,6 +9,7 @@ import hashlib
 import json
 from typing import Optional, Dict, Any, List
 
+from gateway.canonical_format import to_canonical_messages
 from gateway.logging_setup import log
 from gateway import config
 
@@ -111,12 +112,22 @@ def compute_context_hash(messages: List[Dict], system: str = "") -> str:
     # Use all messages except the last one (the query)
     context_messages = messages[:-1] if len(messages) > 1 else []
     
+    canonical_context = to_canonical_messages(context_messages[-5:])
+    canonical_payload = []
+    for msg in canonical_context:
+        text_fragments = []
+        for block in msg.content:
+            if block.type == "text" and block.text:
+                text_fragments.append(block.text)
+            elif block.type == "tool_use" and block.tool_name:
+                text_fragments.append(f"[tool:{block.tool_name}]")
+            elif block.type == "tool_result" and block.text:
+                text_fragments.append(f"[tool_result:{block.text}]")
+        canonical_payload.append({"role": msg.role, "content": "\n".join(text_fragments)[:200]})
+
     content = json.dumps({
         "system": system[:500] if system else "",
-        "context": [
-            {"role": m.get("role"), "content": str(m.get("content", ""))[:200]}
-            for m in context_messages[-5:]  # Last 5 context messages
-        ]
+        "context": canonical_payload,
     }, sort_keys=True)
     
     return hashlib.sha256(content.encode()).hexdigest()[:16]
@@ -264,21 +275,19 @@ async def store_semantic_cache(
 
 def extract_last_user_message(messages: List[Dict]) -> str:
     """Extract text from the last user message."""
-    for msg in reversed(messages):
-        if msg.get("role") != "user":
+    canonical = to_canonical_messages(messages)
+    for msg in reversed(canonical):
+        if msg.role != "user":
             continue
-        
-        content = msg.get("content", "")
-        
-        if isinstance(content, str):
-            return content
-        
-        if isinstance(content, list):
-            parts = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(block.get("text", ""))
-            return " ".join(parts)
+
+        parts = []
+        for block in msg.content:
+            if block.type == "text" and block.text:
+                parts.append(block.text)
+
+        text = " ".join(parts).strip()
+        if text:
+            return text
     
     return ""
 

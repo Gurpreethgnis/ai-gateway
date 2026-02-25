@@ -2,8 +2,10 @@
 Gemini Provider - Google Generative AI integration.
 """
 
+import json
 from typing import List, Dict, Any, AsyncIterator, Optional
 
+from gateway.canonical_format import CanonicalMessage, canonical_to_openai_messages, to_canonical_messages
 from gateway.providers.base import BaseProvider, CompletionResponse, StreamChunk
 from gateway.logging_setup import log
 from gateway import config
@@ -78,6 +80,19 @@ class GeminiProvider(BaseProvider):
                     if isinstance(block, dict):
                         if block.get("type") == "text":
                             parts.append(block.get("text", ""))
+                        elif block.get("type") == "image_url":
+                            image_url = (block.get("image_url") or {}).get("url") or ""
+                            if image_url.startswith("data:") and "," in image_url:
+                                header, data = image_url.split(",", 1)
+                                mime = "image/png"
+                                if ";" in header:
+                                    mime = header.replace("data:", "").split(";")[0] or "image/png"
+                                parts.append({
+                                    "inline_data": {
+                                        "mime_type": mime,
+                                        "data": data,
+                                    }
+                                })
                         elif block.get("type") == "image":
                             # Handle image - Gemini uses inline_data
                             source = block.get("source", {})
@@ -176,7 +191,7 @@ class GeminiProvider(BaseProvider):
                             "type": "function",
                             "function": {
                                 "name": part.function_call.name,
-                                "arguments": str(dict(part.function_call.args)),
+                                "arguments": json.dumps(dict(part.function_call.args)),
                             },
                         })
             
@@ -262,3 +277,11 @@ class GeminiProvider(BaseProvider):
     def normalize_messages(self, messages: List[Dict]) -> List[Dict]:
         """Pass through - conversion happens in _convert_messages_to_gemini."""
         return messages
+
+    def to_canonical(self, messages: List[Dict[str, Any]]) -> List[CanonicalMessage]:
+        """Convert request messages to canonical format."""
+        return to_canonical_messages(messages)
+
+    def from_canonical(self, messages: List[CanonicalMessage]) -> List[Dict[str, Any]]:
+        """Convert canonical messages into OpenAI-compatible format for Gemini ingestion."""
+        return canonical_to_openai_messages(messages)

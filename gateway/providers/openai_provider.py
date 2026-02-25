@@ -4,6 +4,9 @@ OpenAI Provider - Native OpenAI API integration.
 
 from typing import List, Dict, Any, AsyncIterator, Optional
 
+from gateway.canonical_format import CanonicalMessage, canonical_to_openai_messages, to_canonical_messages
+from gateway.prompt_cache_strategy import stabilize_system_prompt, extract_openai_cached_tokens
+from gateway.metrics import record_provider_cache_event
 from gateway.providers.base import BaseProvider, CompletionResponse, StreamChunk
 from gateway.logging_setup import log
 from gateway import config
@@ -60,15 +63,18 @@ class OpenAIProvider(BaseProvider):
         # Build messages with system prompt
         api_messages = []
         if system:
-            api_messages.append({"role": "system", "content": system})
+            api_messages.append({"role": "system", "content": stabilize_system_prompt(system)})
         api_messages.extend(self.normalize_messages(messages))
         
         # Build request kwargs
         request_kwargs: Dict[str, Any] = {
             "model": model_id,
             "messages": api_messages,
-            "max_tokens": max_tokens,
         }
+        if model_id.startswith("o1"):
+            request_kwargs["max_completion_tokens"] = max_tokens
+        else:
+            request_kwargs["max_tokens"] = max_tokens
         
         # o1 models don't support temperature or system messages the same way
         if not model_id.startswith("o1"):
@@ -80,6 +86,11 @@ class OpenAIProvider(BaseProvider):
         
         try:
             response = await self.client.chat.completions.create(**request_kwargs)
+            cached_prompt_tokens = extract_openai_cached_tokens(response)
+            if cached_prompt_tokens > 0:
+                record_provider_cache_event("openai", "openai_prefix", True, tokens=cached_prompt_tokens)
+            else:
+                record_provider_cache_event("openai", "openai_prefix", False)
             
             choice = response.choices[0]
             content = choice.message.content or ""
@@ -107,6 +118,7 @@ class OpenAIProvider(BaseProvider):
                 finish_reason=choice.finish_reason or "stop",
                 tool_calls=tool_calls,
                 raw_response=response.model_dump() if hasattr(response, "model_dump") else None,
+                cache_read_tokens=cached_prompt_tokens,
             )
             
         except Exception as e:
@@ -130,16 +142,19 @@ class OpenAIProvider(BaseProvider):
         # Build messages with system prompt
         api_messages = []
         if system:
-            api_messages.append({"role": "system", "content": system})
+            api_messages.append({"role": "system", "content": stabilize_system_prompt(system)})
         api_messages.extend(self.normalize_messages(messages))
         
         # Build request kwargs
         request_kwargs: Dict[str, Any] = {
             "model": model_id,
             "messages": api_messages,
-            "max_tokens": max_tokens,
             "stream": True,
         }
+        if model_id.startswith("o1"):
+            request_kwargs["max_completion_tokens"] = max_tokens
+        else:
+            request_kwargs["max_tokens"] = max_tokens
         
         if not model_id.startswith("o1"):
             request_kwargs["temperature"] = temperature
@@ -248,3 +263,11 @@ class OpenAIProvider(BaseProvider):
                 })
         
         return normalized
+
+    def to_canonical(self, messages: List[Dict[str, Any]]) -> List[CanonicalMessage]:
+        """Convert request messages to canonical format."""
+        return to_canonical_messages(messages)
+
+    def from_canonical(self, messages: List[CanonicalMessage]) -> List[Dict[str, Any]]:
+        """Convert canonical format back into OpenAI-compatible messages."""
+        return canonical_to_openai_messages(messages)

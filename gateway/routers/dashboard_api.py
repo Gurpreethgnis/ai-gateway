@@ -99,6 +99,17 @@ class PullJobStatus(BaseModel):
     created_at: datetime
 
 
+class ProviderSummary(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+    provider: str
+    available: bool
+    configured: bool
+    model_count: int
+    cache_strategy: str
+    supports_tools: bool
+    supports_vision: bool
+
+
 # =============================================================================
 # Preferences Endpoints
 # =============================================================================
@@ -448,6 +459,7 @@ async def pull_ollama_model(
     """
     from gateway.db import get_session
     from sqlalchemy import text
+    user_id = user["id"] if user and "id" in user else None
     
     # Create pull job record
     async with get_session() as session:
@@ -457,7 +469,7 @@ async def pull_ollama_model(
                 VALUES (:model_name, 'pending', :user_id)
                 RETURNING id
             """),
-            {"model_name": body.model_name, "user_id": user["id"]},
+            {"model_name": body.model_name, "user_id": user_id},
         )
         job_id = result.scalar()
     
@@ -485,7 +497,31 @@ async def _pull_model_task(job_id: int, model_name: str):
         
         # Pull model
         provider = OllamaProvider()
-        success = await provider.pull_model(model_name)
+        success = False
+        progress = 0.0
+        async for update in provider.pull_model(model_name):
+            status_text = str(update.get("status", "")).lower()
+
+            completed = update.get("completed")
+            total = update.get("total")
+            if isinstance(completed, (int, float)) and isinstance(total, (int, float)) and total > 0:
+                progress = min(1.0, max(0.0, float(completed) / float(total)))
+
+                async with get_session() as session:
+                    await session.execute(
+                        text("""
+                            UPDATE ollama_pull_jobs
+                            SET progress = :progress
+                            WHERE id = :id
+                        """),
+                        {"id": job_id, "progress": progress},
+                    )
+
+            if update.get("error"):
+                raise RuntimeError(str(update.get("error")))
+
+            if status_text in {"success", "done"} or bool(update.get("done")):
+                success = True
         
         # Update final status
         async with get_session() as session:
@@ -494,10 +530,14 @@ async def _pull_model_task(job_id: int, model_name: str):
                     UPDATE ollama_pull_jobs 
                     SET status = :status, 
                         completed_at = NOW(),
-                        progress = 1.0
+                        progress = :progress
                     WHERE id = :id
                 """),
-                {"id": job_id, "status": "completed" if success else "failed"},
+                {
+                    "id": job_id,
+                    "status": "completed" if success else "failed",
+                    "progress": 1.0 if success else progress,
+                },
             )
         
         log.info("Ollama pull job %d completed: %s", job_id, "success" if success else "failed")
@@ -655,6 +695,11 @@ async def get_stats(
 def _extract_provider(model: str) -> str:
     """Extract provider name from model ID."""
     model_lower = model.lower()
+
+    if model_lower.startswith("ollama/"):
+        return "ollama"
+    if model_lower.startswith("groq/"):
+        return "groq"
     
     if "claude" in model_lower:
         return "anthropic"
@@ -681,18 +726,39 @@ async def get_provider_status(
 ):
     """Check status of all configured providers."""
     from gateway.providers.registry import get_provider_registry
+    import inspect
     
     registry = get_provider_registry()
-    providers = registry.get_available_providers()
+    providers = getattr(registry, "providers", {}) or {}
+    if not providers and hasattr(registry, "initialize"):
+        try:
+            maybe = registry.initialize()
+            if inspect.isawaitable(maybe):
+                await maybe
+            providers = getattr(registry, "providers", {}) or {}
+        except Exception:
+            providers = {}
     
     status = {}
     for name, provider in providers.items():
         try:
             # Simple health check
-            is_available = await provider.is_available()
+            is_available = True
+            if hasattr(provider, 'is_available'):
+                maybe_available = provider.is_available()
+                is_available = await maybe_available if inspect.isawaitable(maybe_available) else bool(maybe_available)
+
+            models = []
+            if hasattr(provider, 'get_supported_models'):
+                maybe_models = provider.get_supported_models()
+                models = list(maybe_models) if maybe_models else []
+            elif hasattr(provider, 'get_models'):
+                maybe_models = provider.get_models()
+                models = list(maybe_models) if maybe_models else []
+
             status[name] = {
                 "available": is_available,
-                "models": list(provider.get_supported_models()) if hasattr(provider, 'get_supported_models') else [],
+                "models": models,
             }
         except Exception as e:
             status[name] = {
@@ -701,3 +767,78 @@ async def get_provider_status(
             }
     
     return {"providers": status}
+
+
+@router.get("/providers/summary")
+async def get_provider_summary(
+    request: Request,
+    user: Optional[dict] = Depends(optional_auth),
+) -> dict:
+    """Get provider summary for dashboard cards."""
+    from gateway.model_registry import get_model_registry
+
+    cache_strategy = {
+        "anthropic": "anthropic_prompt",
+        "openai": "openai_prefix",
+        "gemini": "gemini_context",
+        "groq": "none",
+        "ollama": "ollama_kv",
+    }
+
+    configured = {
+        "anthropic": bool(getattr(config, "ANTHROPIC_API_KEY", None)),
+        "openai": bool(getattr(config, "OPENAI_API_KEY", None)),
+        "gemini": bool(getattr(config, "GEMINI_API_KEY", None)),
+        "groq": bool(getattr(config, "GROQ_API_KEY", None)),
+        "ollama": bool(getattr(config, "OLLAMA_URL", None) or getattr(config, "LOCAL_LLM_BASE_URL", None)),
+    }
+
+    status_response = await get_provider_status(request, user)
+    status_map = status_response.get("providers", {}) if isinstance(status_response, dict) else {}
+
+    registry = get_model_registry()
+    model_counts = {}
+    supports = {}
+    for model in registry.models.values():
+        provider = getattr(model, "provider", "unknown")
+        model_counts[provider] = model_counts.get(provider, 0) + 1
+        if provider not in supports:
+            supports[provider] = {
+                "tools": bool(getattr(model, "supports_tools", False)),
+                "vision": bool(getattr(model, "supports_vision", False)),
+            }
+        else:
+            supports[provider]["tools"] = supports[provider]["tools"] or bool(getattr(model, "supports_tools", False))
+            supports[provider]["vision"] = supports[provider]["vision"] or bool(getattr(model, "supports_vision", False))
+
+    summaries = []
+    providers = ["anthropic", "openai", "gemini", "groq", "ollama"]
+    for provider in providers:
+        status_item = status_map.get(provider, {}) if isinstance(status_map, dict) else {}
+        support_info = supports.get(provider, {"tools": False, "vision": False})
+        summaries.append(
+            ProviderSummary(
+                provider=provider,
+                available=bool(status_item.get("available", False)),
+                configured=configured.get(provider, False),
+                model_count=int(model_counts.get(provider, 0)),
+                cache_strategy=cache_strategy.get(provider, "none"),
+                supports_tools=bool(support_info.get("tools", False)),
+                supports_vision=bool(support_info.get("vision", False)),
+            )
+        )
+
+    return {"providers": [summary.model_dump() for summary in summaries]}
+
+
+@router.get("/routing/trace")
+async def get_routing_trace(
+    request: Request,
+    limit: int = 25,
+    user: Optional[dict] = Depends(optional_auth),
+) -> dict:
+    """Get recent routing trace events for dashboard UI."""
+    from gateway.routing_trace import get_recent_routing_trace
+
+    events = await get_recent_routing_trace(limit=max(1, min(limit, 100)))
+    return {"events": events}

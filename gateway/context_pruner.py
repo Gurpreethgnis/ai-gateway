@@ -1,4 +1,6 @@
 import re
+import json
+import hashlib
 from typing import List, Dict, Any, Optional, Tuple
 
 from gateway.config import ENABLE_CONTEXT_PRUNING, CONTEXT_MAX_TOKENS
@@ -6,6 +8,115 @@ from gateway.logging_setup import log
 
 
 CHARS_PER_TOKEN = 4
+
+
+def _message_text(message: Dict[str, Any]) -> str:
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                elif block.get("type") == "tool_result":
+                    parts.append(str(block.get("content", "")))
+            elif isinstance(block, str):
+                parts.append(block)
+        return " ".join(parts)
+    return str(content)
+
+
+def score_message_importance(
+    message: Dict[str, Any],
+    index: int,
+    total_messages: int,
+) -> float:
+    """Score message importance (0.0-1.0) for structured pruning."""
+    role = message.get("role", "user")
+    text = _message_text(message).lower()
+
+    recency = (index + 1) / max(total_messages, 1)
+    score = 0.25 + (0.35 * recency)
+
+    if role in ("system", "developer"):
+        score += 0.45
+
+    if message.get("tool_calls"):
+        score += 0.25
+
+    if has_tool_result_blocks(message.get("content")) or has_tool_use_blocks(message.get("content")):
+        score += 0.20
+
+    priority_keywords = [
+        "error", "exception", "traceback", "bug", "fix", "critical", "security",
+        "requirement", "must", "constraint", "regression", "failing",
+    ]
+    if any(keyword in text for keyword in priority_keywords):
+        score += 0.20
+
+    if "```" in text or "def " in text or "class " in text:
+        score += 0.10
+
+    return max(0.0, min(1.0, score))
+
+
+def _summary_cache_key(messages: List[Dict[str, Any]]) -> str:
+    serialized = json.dumps(messages, sort_keys=True, ensure_ascii=False)
+    digest = hashlib.sha256(serialized.encode("utf-8", errors="ignore")).hexdigest()
+    return f"ctxsummary:{digest}"
+
+
+def _get_cached_summary(messages: List[Dict[str, Any]]) -> Optional[str]:
+    try:
+        from gateway.cache import rds
+        if rds is None:
+            return None
+        key = _summary_cache_key(messages)
+        cached = rds.get(key)
+        return cached if isinstance(cached, str) and cached.strip() else None
+    except Exception:
+        return None
+
+
+def _store_cached_summary(messages: List[Dict[str, Any]], summary: str, ttl: int = 1800):
+    try:
+        from gateway.cache import rds
+        if rds is None or not summary:
+            return
+        key = _summary_cache_key(messages)
+        rds.setex(key, ttl, summary)
+    except Exception:
+        return
+
+
+def resolve_effective_context_limit(
+    max_tokens: int,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+) -> int:
+    """Resolve pruning limit using provider/model registry when available."""
+    effective = max_tokens or CONTEXT_MAX_TOKENS
+
+    try:
+        if not model:
+            return effective
+
+        from gateway.model_registry import get_model_registry
+        registry = get_model_registry()
+        model_info = registry.get_model(model)
+        if not model_info and provider and not model.startswith(f"{provider}/"):
+            model_info = registry.get_model(f"{provider}/{model}")
+
+        if model_info and getattr(model_info, "context_window", 0):
+            provider_limit = int(model_info.context_window * 0.8)
+            if provider_limit > 0:
+                return min(effective, provider_limit)
+    except Exception:
+        pass
+
+    return effective
 
 
 def estimate_tokens(text: str) -> int:
@@ -322,9 +433,13 @@ async def prune_context(
     messages: List[Dict[str, Any]],
     max_tokens: int = CONTEXT_MAX_TOKENS,
     system_text: str = "",
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     if not ENABLE_CONTEXT_PRUNING:
         return messages, {"pruned": False, "reason": "disabled"}
+
+    max_tokens = resolve_effective_context_limit(max_tokens, provider=provider, model=model)
 
     system_tokens = estimate_tokens(system_text)
     message_tokens = estimate_messages_tokens(messages)
@@ -375,15 +490,28 @@ async def prune_context(
         dropped = [regular_messages[i] for i in dropped_indices]
 
         if dropped:
-            important = find_important_messages(dropped)
-            important_msgs = [dropped[i] for i in important if i < len(dropped)]
+            # Stage 1: importance scoring for structured retention
+            scored = [
+                (i, dropped[i], score_message_importance(dropped[i], i, len(dropped)))
+                for i in range(len(dropped))
+            ]
+            scored.sort(key=lambda item: item[2], reverse=True)
 
-            summary_text = create_summary_block(dropped)
+            important_indices = sorted([idx for idx, _, score in scored if score >= 0.62][:4])
+            important_msgs = [dropped[i] for i in important_indices if i < len(dropped)]
+
+            # Stage 2: summary for lower-importance dropped context
+            low_importance_msgs = [m for idx, m, score in scored if score < 0.62]
+
+            summary_text = _get_cached_summary(low_importance_msgs or dropped)
+            if not summary_text:
+                summary_text = create_summary_block(low_importance_msgs or dropped)
+                _store_cached_summary(low_importance_msgs or dropped, summary_text)
 
             if estimate_tokens(summary_text) < estimate_messages_tokens(dropped) // 2:
                 pruned.append({
                     "role": "user",
-                    "content": f"[Previous conversation summary ({len(dropped)} messages):\n{summary_text}]",
+                    "content": f"[CONTEXT SUMMARY ({len(dropped)} messages):\n{summary_text}]",
                 })
 
                 # Don't add important messages that might have orphaned tool_results
@@ -394,6 +522,7 @@ async def prune_context(
 
                 meta["summarized_messages"] = len(dropped)
                 meta["kept_important"] = min(3, len(important_msgs))
+                meta["used_summary_cache"] = bool(_get_cached_summary(low_importance_msgs or dropped))
 
     pruned.extend(recent_messages)
     

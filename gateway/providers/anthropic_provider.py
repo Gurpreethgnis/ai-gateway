@@ -8,6 +8,7 @@ import asyncio
 import json
 from typing import List, Dict, Any, AsyncIterator, Optional
 
+from gateway.canonical_format import CanonicalMessage, canonical_to_anthropic_messages, to_canonical_messages
 from gateway.providers.base import BaseProvider, CompletionResponse, StreamChunk
 from gateway.logging_setup import log
 from gateway import config
@@ -343,3 +344,11 @@ class AnthropicProvider(BaseProvider):
                 })
         
         return normalized
+
+    def to_canonical(self, messages: List[Dict[str, Any]]) -> List[CanonicalMessage]:
+        """Convert request messages to canonical format."""
+        return to_canonical_messages(messages)
+
+    def from_canonical(self, messages: List[CanonicalMessage]) -> List[Dict[str, Any]]:
+        """Convert canonical messages into Anthropic-compatible format."""
+        return canonical_to_anthropic_messages(messages)

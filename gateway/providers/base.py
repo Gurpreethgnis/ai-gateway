@@ -9,6 +9,12 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Any, AsyncIterator, Optional, AsyncGenerator
 from dataclasses import dataclass
 
+from gateway.canonical_format import (
+    CanonicalMessage,
+    canonical_to_openai_messages,
+    to_canonical_messages,
+)
+
 
 @dataclass
 class CompletionResponse:
@@ -157,3 +163,20 @@ class BaseProvider(ABC):
         Override in subclasses for provider-specific transformations.
         """
         return messages
+
+    def to_canonical(self, messages: List[Dict[str, Any]]) -> List[CanonicalMessage]:
+        """
+        Convert provider/openai-style messages into canonical format.
+
+        Providers can override for more exact lossless conversions.
+        """
+        return to_canonical_messages(messages)
+
+    def from_canonical(self, messages: List[CanonicalMessage]) -> List[Dict[str, Any]]:
+        """
+        Convert canonical messages into this provider's wire format.
+
+        Default behavior returns OpenAI-compatible message dictionaries.
+        Providers should override when they need stronger format guarantees.
+        """
+        return canonical_to_openai_messages(messages)

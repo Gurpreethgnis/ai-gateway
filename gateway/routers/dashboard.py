@@ -145,6 +145,49 @@ DASHBOARD_HTML = """
             transition: all 0.2s;
         }
         .logout-btn:hover { border-color: var(--primary); color: var(--text); }
+        .provider-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 0.75rem;
+            margin-top: 0.75rem;
+        }
+        .provider-card {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            padding: 0.75rem;
+        }
+        .provider-title {
+            font-size: 0.9rem;
+            font-weight: 700;
+            text-transform: capitalize;
+            margin-bottom: 0.25rem;
+        }
+        .trace-list {
+            display: grid;
+            gap: 0.5rem;
+            max-height: 220px;
+            overflow-y: auto;
+            margin-top: 0.75rem;
+        }
+        .trace-item {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            font-size: 0.8rem;
+            color: var(--text-dim);
+        }
+        .warning-banner {
+            margin-top: 0.75rem;
+            padding: 0.5rem 0.75rem;
+            border: 1px solid rgba(245, 158, 11, 0.4);
+            background: rgba(245, 158, 11, 0.12);
+            color: #fbbf24;
+            border-radius: 0.5rem;
+            font-size: 0.8rem;
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -215,28 +258,139 @@ DASHBOARD_HTML = """
                 </label>
                 <button onclick="savePreferences()" class="refresh-btn">Save Preferences</button>
             </div>
+            <div id="capability-warning" class="warning-banner"></div>
+        </div>
+
+        <div class="card" style="margin-bottom: 2rem; padding: 1.5rem;">
+            <h2 style="font-size: 1.25rem; margin-bottom: 0.25rem;">Provider Status</h2>
+            <p style="color: var(--text-dim); font-size: 0.85rem;">Live availability, capabilities, model count, and cache strategy per provider.</p>
+            <div id="provider-grid" class="provider-grid">
+                <div style="color: var(--text-dim);">Loading provider status...</div>
+            </div>
+        </div>
+
+        <div class="card" style="margin-bottom: 2rem; padding: 1.5rem;">
+            <h2 style="font-size: 1.25rem; margin-bottom: 0.25rem;">Routing Trace</h2>
+            <p style="color: var(--text-dim); font-size: 0.85rem;">Recent routing decisions across local/cloud providers.</p>
+            <div id="routing-trace" class="trace-list">
+                <div style="color: var(--text-dim);">Loading routing trace...</div>
+            </div>
         </div>
         <script>
             document.getElementById('cost-quality').addEventListener('input', function() {
                 document.getElementById('cost-quality-val').textContent = this.value + '%';
+                evaluateCapabilityWarning();
             });
             document.getElementById('speed-quality').addEventListener('input', function() {
                 document.getElementById('speed-quality-val').textContent = this.value + '%';
+                evaluateCapabilityWarning();
             });
+            document.getElementById('cascade-enabled').addEventListener('change', function() {
+                evaluateCapabilityWarning();
+            });
+
+            let dashboardModels = [];
             async function loadPreferences() {
                 try {
                     const resp = await fetch('/api/preferences');
                     if (!resp.ok) return;
                     const prefs = await resp.json();
-                    const costPct = Math.round((prefs.cost_quality_bias ?? 0.3) * 100);
-                    const speedPct = Math.round((prefs.speed_quality_bias ?? 0.5) * 100);
-                    document.getElementById('cost-quality').value = costPct;
-                    document.getElementById('cost-quality-val').textContent = costPct + '%';
-                    document.getElementById('speed-quality').value = speedPct;
-                    document.getElementById('speed-quality-val').textContent = speedPct + '%';
-                    document.getElementById('cascade-enabled').checked = prefs.cascade_enabled !== false;
+                    const costEl = document.getElementById('cost-quality');
+                    const speedEl = document.getElementById('speed-quality');
+                    const cascadeEl = document.getElementById('cascade-enabled');
+
+                    if (typeof prefs.cost_quality_bias === 'number') {
+                        costEl.value = Math.round(prefs.cost_quality_bias * 100);
+                        document.getElementById('cost-quality-val').textContent = costEl.value + '%';
+                    }
+                    if (typeof prefs.speed_quality_bias === 'number') {
+                        speedEl.value = Math.round(prefs.speed_quality_bias * 100);
+                        document.getElementById('speed-quality-val').textContent = speedEl.value + '%';
+                    }
+                    if (typeof prefs.cascade_enabled === 'boolean') {
+                        cascadeEl.checked = prefs.cascade_enabled;
+                    }
+
+                    evaluateCapabilityWarning();
                 } catch (e) { console.warn('Load preferences failed:', e); }
             }
+
+            async function loadProviderSummary() {
+                const container = document.getElementById('provider-grid');
+                try {
+                    const resp = await fetch('/api/providers/summary');
+                    if (!resp.ok) {
+                        container.innerHTML = '<div style="color: var(--text-dim);">Provider summary unavailable.</div>';
+                        return;
+                    }
+                    const data = await resp.json();
+                    const providers = data.providers || [];
+                    if (providers.length === 0) {
+                        container.innerHTML = '<div style="color: var(--text-dim);">No provider data.</div>';
+                        return;
+                    }
+
+                    container.innerHTML = providers.map(p => {
+                        const availBadge = p.available ? '<span class="badge badge-cached">UP</span>' : '<span class="badge badge-miss">DOWN</span>';
+                        return `<div class="provider-card">
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.25rem;">
+                                <div class="provider-title">${p.provider}</div>
+                                ${availBadge}
+                            </div>
+                            <div style="font-size:0.78rem; color: var(--text-dim);">Configured: ${p.configured ? 'Yes' : 'No'}</div>
+                            <div style="font-size:0.78rem; color: var(--text-dim);">Models: ${p.model_count}</div>
+                            <div style="font-size:0.78rem; color: var(--text-dim);">Cache: ${p.cache_strategy}</div>
+                            <div style="font-size:0.78rem; color: var(--text-dim);">Tools: ${p.supports_tools ? 'Yes' : 'No'} | Vision: ${p.supports_vision ? 'Yes' : 'No'}</div>
+                        </div>`;
+                    }).join('');
+                } catch (e) {
+                    container.innerHTML = '<div style="color: var(--text-dim);">Provider summary unavailable.</div>';
+                }
+            }
+
+            async function loadRoutingTrace() {
+                const container = document.getElementById('routing-trace');
+                try {
+                    const resp = await fetch('/api/routing/trace?limit=20');
+                    if (!resp.ok) {
+                        container.innerHTML = '<div style="color: var(--text-dim);">Routing trace unavailable.</div>';
+                        return;
+                    }
+                    const data = await resp.json();
+                    const events = data.events || [];
+                    if (events.length === 0) {
+                        container.innerHTML = '<div style="color: var(--text-dim);">No routing events yet.</div>';
+                        return;
+                    }
+
+                    container.innerHTML = events.map(e => {
+                        const ts = e.timestamp ? new Date(e.timestamp * 1000).toLocaleTimeString() : '--:--:--';
+                        const escalated = e.escalated ? ' | escalated' : '';
+                        const reason = e.escalation_reason ? ` | ${e.escalation_reason}` : '';
+                        return `<div class="trace-item">${ts} — ${e.provider || 'unknown'} / ${e.model || 'unknown'}${escalated}${reason}</div>`;
+                    }).join('');
+                } catch (e) {
+                    container.innerHTML = '<div style="color: var(--text-dim);">Routing trace unavailable.</div>';
+                }
+            }
+
+            function evaluateCapabilityWarning() {
+                const warning = document.getElementById('capability-warning');
+                if (!warning) return;
+
+                const enabledModels = (dashboardModels || []).filter(m => m.is_enabled);
+                const anyToolsCapable = enabledModels.some(m => (m.capabilities || []).includes('tools'));
+                if (!anyToolsCapable) {
+                    warning.style.display = 'block';
+                    warning.textContent = 'No enabled models currently support tools. Tool-heavy requests may fail or degrade.';
+                    return;
+                }
+
+                warning.style.display = 'none';
+                warning.textContent = '';
+            }
+
+>>>>>>> 6869e71 (Close stage gaps and provider routing)
             async function savePreferences() {
                 const prefs = {
                     cost_quality_bias: document.getElementById('cost-quality').value / 100,
@@ -365,6 +519,10 @@ DASHBOARD_HTML = """
                 loadPreferences();
                 loadModels();
                 loadOllamaModels();
+                loadProviderSummary();
+                loadRoutingTrace();
+                setInterval(loadProviderSummary, 15000);
+                setInterval(loadRoutingTrace, 5000);
             });
             
             async function loadModels() {
@@ -376,6 +534,7 @@ DASHBOARD_HTML = """
                         return;
                     }
                     const models = await resp.json();
+                    dashboardModels = models || [];
                     
                     if (!models || models.length === 0) {
                         container.innerHTML = '<div style="color: var(--text-dim);">No models configured.</div>';
@@ -413,6 +572,7 @@ DASHBOARD_HTML = """
                         html += '</div>';
                     }
                     container.innerHTML = html;
+                    evaluateCapabilityWarning();
                 } catch (e) {
                     container.innerHTML = '<div style="color: var(--error);">Error loading models: ' + e.message + '</div>';
                 }

@@ -61,9 +61,10 @@ def strip_or_truncate(role: str, text: str, max_chars: int, allow_strip: bool) -
 
     if max_chars > 0 and len(text) > max_chars:
         meta["truncated"] = True
+        omitted = len(text) - max_chars
         head = text[: int(max_chars * 0.7)]
         tail = text[-int(max_chars * 0.3):]
-        text = head + "\n\n[...TRUNCATED...]\n\n" + tail
+        text = head + f"\n\n[...TRUNCATED: {omitted} chars omitted...]\n\n" + tail
         meta["after"] = len(text)
         return text, meta
 
