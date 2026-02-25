@@ -163,6 +163,11 @@ class GeminiProvider(BaseProvider):
                 func = tool.get("function", {})
                 parameters = func.get("parameters") or {}
                 parameters = self._sanitize_schema_for_gemini(parameters)
+                # Gemini errors if required[] lists a property not in properties
+                props = parameters.get("properties") or {}
+                required = parameters.get("required")
+                if required and isinstance(required, list):
+                    parameters = {**parameters, "required": [r for r in required if r in props]}
                 functions.append({
                     "name": func.get("name", ""),
                     "description": func.get("description", ""),
