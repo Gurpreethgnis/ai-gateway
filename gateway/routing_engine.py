@@ -463,11 +463,13 @@ async def route_request(
             DEFAULT_COST_QUALITY_BIAS,
             DEFAULT_SPEED_QUALITY_BIAS,
             DEFAULT_CASCADE_ENABLED,
+            DEFAULT_MAX_CASCADE_ATTEMPTS,
         )
         preferences = RoutingPreferences(
             cost_quality_bias=DEFAULT_COST_QUALITY_BIAS,
             speed_quality_bias=DEFAULT_SPEED_QUALITY_BIAS,
             cascade_enabled=DEFAULT_CASCADE_ENABLED,
+            max_cascade_attempts=DEFAULT_MAX_CASCADE_ATTEMPTS,
         )
 
     if registry is None:
@@ -504,6 +506,8 @@ async def get_routing_decision_async(
     explicit_model: Optional[str] = None,
     cost_quality_bias: Optional[float] = None,
     speed_quality_bias: Optional[float] = None,
+    cascade_enabled: Optional[bool] = None,
+    max_cascade_attempts: Optional[int] = None,
     exclude_providers: Optional[List[str]] = None,
     project_id: Optional[int] = None,
 ) -> RoutingDecision:
@@ -517,6 +521,7 @@ async def get_routing_decision_async(
         DEFAULT_COST_QUALITY_BIAS,
         DEFAULT_SPEED_QUALITY_BIAS,
         DEFAULT_CASCADE_ENABLED,
+        DEFAULT_MAX_CASCADE_ATTEMPTS,
     )
     from gateway.model_registry import get_model_registry
 
@@ -530,11 +535,12 @@ async def get_routing_decision_async(
     if explicit_model:
         body["model"] = explicit_model
 
-    # Build preferences
+    # Build preferences (use loaded values; fall back to config defaults when None)
     prefs = RoutingPreferences(
         cost_quality_bias=cost_quality_bias if cost_quality_bias is not None else DEFAULT_COST_QUALITY_BIAS,
         speed_quality_bias=speed_quality_bias if speed_quality_bias is not None else DEFAULT_SPEED_QUALITY_BIAS,
-        cascade_enabled=DEFAULT_CASCADE_ENABLED,
+        cascade_enabled=cascade_enabled if cascade_enabled is not None else DEFAULT_CASCADE_ENABLED,
+        max_cascade_attempts=max_cascade_attempts if max_cascade_attempts is not None else DEFAULT_MAX_CASCADE_ATTEMPTS,
     )
 
     registry = get_model_registry()

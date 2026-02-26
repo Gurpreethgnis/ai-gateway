@@ -28,6 +28,8 @@ async def route_with_cascade(
     explicit_model: Optional[str] = None,
     cost_quality_bias: Optional[float] = None,
     speed_quality_bias: Optional[float] = None,
+    cascade_enabled: Optional[bool] = None,
+    max_cascade_attempts: Optional[int] = None,
     session_id: Optional[str] = None,
 ) -> Tuple[Any, Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """
@@ -43,6 +45,8 @@ async def route_with_cascade(
         explicit_model: Explicit model request (if any)
         cost_quality_bias: Optional override (0=cheapest, 1=highest quality)
         speed_quality_bias: Optional override (0=fastest, 1=highest quality)
+        cascade_enabled: Whether cascade (try local first) is enabled for this project
+        max_cascade_attempts: Max escalation attempts (passed to routing preferences)
     
     Returns:
         (decision, local_response, cascade_metadata) where:
@@ -51,32 +55,29 @@ async def route_with_cascade(
         - cascade_metadata: Dict with cascade info for logging
     """
     from gateway.routing_engine import get_routing_decision_async
-    
-    if not ENABLE_CASCADE_ROUTING:
-        # Cascade disabled, use standard routing directly
-        decision = await get_routing_decision_async(
+
+    def _routing_kwargs():
+        return dict(
             messages=messages,
             tools=tools,
             system_prompt=system_prompt,
             explicit_model=explicit_model,
             cost_quality_bias=cost_quality_bias,
             speed_quality_bias=speed_quality_bias,
+            cascade_enabled=cascade_enabled,
+            max_cascade_attempts=max_cascade_attempts,
             project_id=project_id,
         )
+
+    if not ENABLE_CASCADE_ROUTING or (cascade_enabled is not None and not cascade_enabled):
+        # Cascade disabled globally or per-project, use standard routing directly
+        decision = await get_routing_decision_async(**_routing_kwargs())
         return decision, None, {"cascade_enabled": False}
     
     t0 = time.time()
     
     # Phase 1: Get routing decision from new routing engine
-    initial_decision = await get_routing_decision_async(
-        messages=messages,
-        tools=tools,
-        system_prompt=system_prompt,
-        explicit_model=explicit_model,
-        cost_quality_bias=cost_quality_bias,
-        speed_quality_bias=speed_quality_bias,
-        project_id=project_id,
-    )
+    initial_decision = await get_routing_decision_async(**_routing_kwargs())
     
     cascade_metadata = {
         "cascade_enabled": True,
@@ -122,6 +123,8 @@ async def route_with_cascade(
                 exclude_provider="ollama",
                 cost_quality_bias=cost_quality_bias,
                 speed_quality_bias=speed_quality_bias,
+                cascade_enabled=cascade_enabled,
+                max_cascade_attempts=max_cascade_attempts,
                 project_id=project_id,
             )
             cascade_metadata["escalated"] = True
@@ -158,6 +161,8 @@ async def route_with_cascade(
             exclude_provider="ollama",
             cost_quality_bias=cost_quality_bias,
             speed_quality_bias=speed_quality_bias,
+            cascade_enabled=cascade_enabled,
+            max_cascade_attempts=max_cascade_attempts,
             project_id=project_id,
         )
         cascade_metadata["escalated"] = True
@@ -174,6 +179,8 @@ async def route_with_cascade(
             exclude_provider="ollama",
             cost_quality_bias=cost_quality_bias,
             speed_quality_bias=speed_quality_bias,
+            cascade_enabled=cascade_enabled,
+            max_cascade_attempts=max_cascade_attempts,
             project_id=project_id,
         )
         cascade_metadata["escalated"] = True
@@ -189,6 +196,8 @@ async def _get_escalation_decision(
     exclude_provider: str,
     cost_quality_bias: Optional[float] = None,
     speed_quality_bias: Optional[float] = None,
+    cascade_enabled: Optional[bool] = None,
+    max_cascade_attempts: Optional[int] = None,
     project_id: Optional[int] = None,
 ):
     """
@@ -203,6 +212,8 @@ async def _get_escalation_decision(
         explicit_model=None,
         cost_quality_bias=cost_quality_bias,
         speed_quality_bias=speed_quality_bias,
+        cascade_enabled=cascade_enabled,
+        max_cascade_attempts=max_cascade_attempts,
         exclude_providers=[exclude_provider],
         project_id=project_id,
     )

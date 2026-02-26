@@ -13,6 +13,8 @@ from gateway.config import (
     ENFORCE_DIFF_FIRST,
     DEFAULT_COST_QUALITY_BIAS,
     DEFAULT_SPEED_QUALITY_BIAS,
+    DEFAULT_CASCADE_ENABLED,
+    DEFAULT_MAX_CASCADE_ATTEMPTS,
 )
 from gateway.logging_setup import log
 from gateway.db import hash_api_key
@@ -145,12 +147,18 @@ async def get_project_by_id(project_id: int) -> Optional[ProjectInfo]:
 
 async def get_routing_preferences(project_id: Optional[int]) -> tuple:
     """
-    Load saved routing preferences (cost/speed bias) for the project.
-    Returns (cost_quality_bias, speed_quality_bias) for use in routing.
+    Load saved routing preferences for the project.
+    Returns (cost_quality_bias, speed_quality_bias, cascade_enabled, max_cascade_attempts).
     When project_id is None or not found, uses first project by id; falls back to config defaults.
     """
+    defaults = (
+        DEFAULT_COST_QUALITY_BIAS,
+        DEFAULT_SPEED_QUALITY_BIAS,
+        DEFAULT_CASCADE_ENABLED,
+        DEFAULT_MAX_CASCADE_ATTEMPTS,
+    )
     if not DATABASE_URL:
-        return (DEFAULT_COST_QUALITY_BIAS, DEFAULT_SPEED_QUALITY_BIAS)
+        return defaults
     try:
         from gateway.db import get_session
         from sqlalchemy import text
@@ -162,12 +170,13 @@ async def get_routing_preferences(project_id: Optional[int]) -> tuple:
                 row = r.fetchone()
                 pid = row[0] if row else None
         if pid is None:
-            return (DEFAULT_COST_QUALITY_BIAS, DEFAULT_SPEED_QUALITY_BIAS)
+            return defaults
 
         async with get_session() as session:
             r = await session.execute(
                 text("""
-                    SELECT cost_quality_bias, speed_quality_bias
+                    SELECT cost_quality_bias, speed_quality_bias,
+                           cascade_enabled, max_cascade_attempts
                     FROM projects WHERE id = :pid
                 """),
                 {"pid": pid},
@@ -176,10 +185,12 @@ async def get_routing_preferences(project_id: Optional[int]) -> tuple:
         if row:
             cost = row[0] if row[0] is not None else DEFAULT_COST_QUALITY_BIAS
             speed = row[1] if row[1] is not None else DEFAULT_SPEED_QUALITY_BIAS
-            return (float(cost), float(speed))
+            cascade = row[2] if row[2] is not None else DEFAULT_CASCADE_ENABLED
+            max_cascade = row[3] if row[3] is not None else DEFAULT_MAX_CASCADE_ATTEMPTS
+            return (float(cost), float(speed), bool(cascade), int(max_cascade))
     except Exception as e:
         log.debug("Could not load routing preferences: %r", e)
-    return (DEFAULT_COST_QUALITY_BIAS, DEFAULT_SPEED_QUALITY_BIAS)
+    return defaults
 
 
 async def update_project_config(project_id: int, config_updates: Dict[str, Any]) -> bool:

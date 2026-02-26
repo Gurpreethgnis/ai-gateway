@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional, List, AsyncGenerator
 from contextlib import asynccontextmanager
 
-from sqlalchemy import String, Text, Integer, Float, DateTime, ForeignKey, Index, func, text
+from sqlalchemy import String, Text, Integer, Float, Boolean, DateTime, ForeignKey, Index, func, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
@@ -29,6 +29,11 @@ class Project(Base):
     rate_limit_rpm: Mapped[int] = mapped_column(Integer, default=60)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     is_active: Mapped[bool] = mapped_column(default=True)
+    # Routing preferences (also added by migration 002_add_auth_and_routing.sql)
+    cost_quality_bias: Mapped[Optional[float]] = mapped_column(Float, default=0.5, nullable=True)
+    speed_quality_bias: Mapped[Optional[float]] = mapped_column(Float, default=0.5, nullable=True)
+    cascade_enabled: Mapped[Optional[bool]] = mapped_column(Boolean, default=True, nullable=True)
+    max_cascade_attempts: Mapped[Optional[int]] = mapped_column(Integer, default=2, nullable=True)
 
     usage_records: Mapped[List["UsageRecord"]] = relationship(back_populates="project")
     file_hashes: Mapped[List["FileHashEntry"]] = relationship(back_populates="project")

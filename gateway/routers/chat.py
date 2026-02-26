@@ -71,8 +71,11 @@ async def chat(req: Request, body: ChatReq):
             
             if ENABLE_SMART_ROUTING:
                 messages = [{"role": m.role, "content": m.content} for m in body.messages]
-                
-                if ENABLE_CASCADE_ROUTING:
+                # Load routing preferences (project_id=None uses first project so preferences still apply)
+                from gateway.projects import get_routing_preferences
+                cost_bias, speed_bias, cascade_enabled_pref, max_cascade_attempts_pref = await get_routing_preferences(None)
+
+                if ENABLE_CASCADE_ROUTING and cascade_enabled_pref:
                     # Use cascade routing
                     from gateway.cascade_router import route_with_cascade
                     decision, local_response, cascade_metadata = await route_with_cascade(
@@ -81,6 +84,10 @@ async def chat(req: Request, body: ChatReq):
                         project_id=None,
                         system_prompt=body.system or "",
                         explicit_model=body.model,
+                        cost_quality_bias=cost_bias,
+                        speed_quality_bias=speed_bias,
+                        cascade_enabled=cascade_enabled_pref,
+                        max_cascade_attempts=max_cascade_attempts_pref,
                     )
                     
                     if local_response:
@@ -99,7 +106,11 @@ async def chat(req: Request, body: ChatReq):
                         tools=[],
                         project_id=None,
                         explicit_model=body.model,
-                        system_prompt=body.system or ""
+                        system_prompt=body.system or "",
+                        cost_quality_bias=cost_bias,
+                        speed_quality_bias=speed_bias,
+                        cascade_enabled=cascade_enabled_pref,
+                        max_cascade_attempts=max_cascade_attempts_pref,
                     )
                     
                     if decision.provider == "local":

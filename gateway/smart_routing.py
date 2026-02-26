@@ -68,6 +68,8 @@ async def route_request(
     system_prompt: str = "",
     cost_quality_bias: Optional[float] = None,
     speed_quality_bias: Optional[float] = None,
+    cascade_enabled: Optional[bool] = None,
+    max_cascade_attempts: Optional[int] = None,
 ) -> RoutingDecision:
     """
     Route a request to the appropriate model.
@@ -82,6 +84,8 @@ async def route_request(
         system_prompt: System prompt text
         cost_quality_bias: Override cost preference (0=cheapest, 1=quality)
         speed_quality_bias: Override speed preference (0=fastest, 1=quality)
+        cascade_enabled: Whether cascade is enabled (for preference object)
+        max_cascade_attempts: Max cascade attempts (for preference object)
         
     Returns:
         RoutingDecision with selected model
@@ -120,6 +124,8 @@ async def route_request(
             explicit_model=explicit_model,
             cost_quality_bias=cost_quality_bias,
             speed_quality_bias=speed_quality_bias,
+            cascade_enabled=cascade_enabled,
+            max_cascade_attempts=max_cascade_attempts,
             project_id=project_id,
         )
         
