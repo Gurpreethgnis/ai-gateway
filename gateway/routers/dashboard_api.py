@@ -155,7 +155,7 @@ async def get_preferences(
                     cost_quality_bias=row[0] if row[0] is not None else config.DEFAULT_COST_QUALITY_BIAS,
                     speed_quality_bias=row[1] if row[1] is not None else config.DEFAULT_SPEED_QUALITY_BIAS,
                     cascade_enabled=row[2] if row[2] is not None else config.DEFAULT_CASCADE_ENABLED,
-                    max_cascade_attempts=row[3] or 3,
+                    max_cascade_attempts=int(row[3]) if row[3] is not None else config.DEFAULT_MAX_CASCADE_ATTEMPTS,
                 )
 
     first_id = await _get_first_project_id()
@@ -176,14 +176,14 @@ async def get_preferences(
                     cost_quality_bias=row[0] if row[0] is not None else config.DEFAULT_COST_QUALITY_BIAS,
                     speed_quality_bias=row[1] if row[1] is not None else config.DEFAULT_SPEED_QUALITY_BIAS,
                     cascade_enabled=row[2] if row[2] is not None else config.DEFAULT_CASCADE_ENABLED,
-                    max_cascade_attempts=row[3] or 3,
+                    max_cascade_attempts=int(row[3]) if row[3] is not None else config.DEFAULT_MAX_CASCADE_ATTEMPTS,
                 )
 
     return RoutingPreferences(
         cost_quality_bias=config.DEFAULT_COST_QUALITY_BIAS,
         speed_quality_bias=config.DEFAULT_SPEED_QUALITY_BIAS,
         cascade_enabled=config.DEFAULT_CASCADE_ENABLED,
-        max_cascade_attempts=3,
+        max_cascade_attempts=config.DEFAULT_MAX_CASCADE_ATTEMPTS,
     )
 
 
