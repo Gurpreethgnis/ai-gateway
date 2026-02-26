@@ -251,10 +251,14 @@ DASHBOARD_HTML = """
                     </div>
                 </div>
             </div>
-            <div style="margin-top: 1.5rem; display: flex; align-items: center; gap: 1rem;">
+            <div style="margin-top: 1.5rem; display: flex; flex-wrap: wrap; align-items: center; gap: 1rem;">
                 <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
                     <input type="checkbox" id="cascade-enabled" checked style="accent-color: var(--primary);">
                     <span style="font-size: 0.875rem;">Enable automatic fallback (cascade)</span>
+                </label>
+                <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem;">
+                    <span>Max cascade attempts:</span>
+                    <input type="number" id="max-cascade-attempts" min="1" max="5" value="3" style="width: 3rem; padding: 0.25rem 0.5rem; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text);">
                 </label>
                 <button onclick="savePreferences()" class="refresh-btn">Save Preferences</button>
             </div>
@@ -309,6 +313,11 @@ DASHBOARD_HTML = """
                     }
                     if (typeof prefs.cascade_enabled === 'boolean') {
                         cascadeEl.checked = prefs.cascade_enabled;
+                    }
+                    const maxCascadeEl = document.getElementById('max-cascade-attempts');
+                    if (maxCascadeEl && typeof prefs.max_cascade_attempts === 'number') {
+                        const v = Math.max(1, Math.min(5, prefs.max_cascade_attempts));
+                        maxCascadeEl.value = String(v);
                     }
 
                     evaluateCapabilityWarning();
@@ -391,11 +400,13 @@ DASHBOARD_HTML = """
             }
 
             async function savePreferences() {
+                const maxCascadeEl = document.getElementById('max-cascade-attempts');
+                const maxCascade = maxCascadeEl ? Math.max(1, Math.min(5, parseInt(maxCascadeEl.value, 10) || 3)) : 3;
                 const prefs = {
                     cost_quality_bias: document.getElementById('cost-quality').value / 100,
                     speed_quality_bias: document.getElementById('speed-quality').value / 100,
                     cascade_enabled: document.getElementById('cascade-enabled').checked,
-                    max_cascade_attempts: 3
+                    max_cascade_attempts: maxCascade
                 };
                 try {
                     const resp = await fetch('/api/preferences', {

@@ -46,7 +46,6 @@ class RoutingPreferences(BaseModel):
     speed_quality_bias: float = Field(ge=0.0, le=1.0, description="0=fastest, 1=highest quality")
     cascade_enabled: bool = Field(description="Enable automatic fallback on errors")
     max_cascade_attempts: int = Field(ge=1, le=5, default=3)
-    preferred_providers: Optional[List[str]] = Field(default=None, description="Optional provider preference order")
 
 
 class ModelSettingsUpdate(BaseModel):
@@ -136,15 +135,19 @@ async def get_preferences(
 
     # When no project_id is provided (e.g. dashboard without project selector), use first project so preferences persist
     if project_id:
+        try:
+            pid = int(project_id)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Invalid project_id")
         async with get_session() as session:
             result = await session.execute(
                 text("""
                     SELECT cost_quality_bias, speed_quality_bias,
                            cascade_enabled, max_cascade_attempts
                     FROM projects
-                    WHERE api_key = :project_id
+                    WHERE id = :pid
                 """),
-                {"project_id": project_id},
+                {"pid": pid},
             )
             row = result.fetchone()
             if row:
@@ -196,6 +199,10 @@ async def update_preferences(
     from sqlalchemy import text
 
     if project_id:
+        try:
+            pid = int(project_id)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Invalid project_id")
         async with get_session() as session:
             result = await session.execute(
                 text("""
@@ -204,11 +211,11 @@ async def update_preferences(
                         speed_quality_bias = :speed_quality_bias,
                         cascade_enabled = :cascade_enabled,
                         max_cascade_attempts = :max_cascade_attempts
-                    WHERE api_key = :project_id
+                    WHERE id = :pid
                     RETURNING id
                 """),
                 {
-                    "project_id": project_id,
+                    "pid": pid,
                     "cost_quality_bias": prefs.cost_quality_bias,
                     "speed_quality_bias": prefs.speed_quality_bias,
                     "cascade_enabled": prefs.cascade_enabled,

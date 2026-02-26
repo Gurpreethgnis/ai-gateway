@@ -813,14 +813,15 @@ async def openai_chat_completions(req: Request):
             from gateway.cascade_router import route_with_cascade, should_log_routing_outcome
             from gateway.projects import get_routing_preferences
 
-            cost_bias, speed_bias = await get_routing_preferences(project_id)
+            cost_bias, speed_bias, cascade_enabled_pref, max_cascade_attempts_pref = await get_routing_preferences(project_id)
 
-            if ENABLE_CASCADE_ROUTING:
+            if ENABLE_CASCADE_ROUTING and cascade_enabled_pref:
                 # Use cascade routing
                 decision, local_response, cascade_metadata = await route_with_cascade(
                     aa_messages, aa_tools, project_id, system_text,
                     session_id=session_id, explicit_model=request_model,
                     cost_quality_bias=cost_bias, speed_quality_bias=speed_bias,
+                    cascade_enabled=cascade_enabled_pref, max_cascade_attempts=max_cascade_attempts_pref,
                 )
                 
                 # If cascade returned a valid local response, return it immediately
@@ -950,6 +951,7 @@ async def openai_chat_completions(req: Request):
                 decision = await route_request(
                     aa_messages, aa_tools, project_id, request_model, system_text,
                     cost_quality_bias=cost_bias, speed_quality_bias=speed_bias,
+                    cascade_enabled=cascade_enabled_pref, max_cascade_attempts=max_cascade_attempts_pref,
                 )
                 
                 # If routed to local provider, handle via local provider
