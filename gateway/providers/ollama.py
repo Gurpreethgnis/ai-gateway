@@ -55,19 +55,44 @@ class OllamaUpstreamError(Exception):
         super().__init__(f"Ollama upstream error {status_code}: {detail}")
 
 
+def _needs_cf_access(url: str) -> bool:
+    """
+    Return True if the given URL is a remote (Cloudflare tunnel / cloud) endpoint
+    that requires CF Access service-token headers.  Plain local URLs (localhost,
+    127.*.*.*, 10.*.*.*, 172.16-31.*.*, 192.168.*.*) do NOT require them.
+    """
+    if not url:
+        return False
+    import ipaddress, urllib.parse
+    host = urllib.parse.urlparse(url).hostname or ""
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return False
+    try:
+        addr = ipaddress.ip_address(host)
+        return not addr.is_private
+    except ValueError:
+        pass  # not a bare IP — treat as remote (Cloudflare tunnel domain)
+    return True
+
+
 def validate_local_config() -> None:
     """
     Validate that all required environment variables for local LLM are set.
-    Raises HTTPException(500) if any are missing.
+    CF Access credentials are only required when the configured URL is a remote
+    (non-local) endpoint — plain local Ollama installs work without them.
+    Raises HTTPException(500) if required vars are missing.
     """
     missing = []
     if not LOCAL_LLM_BASE_URL:
         missing.append("LOCAL_LLM_BASE_URL")
-    if not LOCAL_CF_ACCESS_CLIENT_ID:
-        missing.append("LOCAL_CF_ACCESS_CLIENT_ID")
-    if not LOCAL_CF_ACCESS_CLIENT_SECRET:
-        missing.append("LOCAL_CF_ACCESS_CLIENT_SECRET")
-    
+
+    # Only require CF Access creds when the URL actually points to a remote host
+    if _needs_cf_access(LOCAL_LLM_BASE_URL or ""):
+        if not LOCAL_CF_ACCESS_CLIENT_ID:
+            missing.append("LOCAL_CF_ACCESS_CLIENT_ID")
+        if not LOCAL_CF_ACCESS_CLIENT_SECRET:
+            missing.append("LOCAL_CF_ACCESS_CLIENT_SECRET")
+
     if missing:
         msg = f"Local LLM provider misconfigured. Missing env vars: {', '.join(missing)}"
         log.error(msg)
@@ -94,12 +119,13 @@ def validate_local_model(model: Optional[str]) -> str:
 
 
 def build_ollama_headers() -> Dict[str, str]:
-    """Build headers for Ollama request including CF Access tokens."""
-    return {
-        "CF-Access-Client-Id": LOCAL_CF_ACCESS_CLIENT_ID,
-        "CF-Access-Client-Secret": LOCAL_CF_ACCESS_CLIENT_SECRET,
-        "Content-Type": "application/json",
-    }
+    """Build headers for Ollama request, adding CF Access tokens only when credentials are configured."""
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if LOCAL_CF_ACCESS_CLIENT_ID:
+        headers["CF-Access-Client-Id"] = LOCAL_CF_ACCESS_CLIENT_ID
+    if LOCAL_CF_ACCESS_CLIENT_SECRET:
+        headers["CF-Access-Client-Secret"] = LOCAL_CF_ACCESS_CLIENT_SECRET
+    return headers
 
 
 async def _ollama_preflight(base_url: str, headers: Dict[str, str], timeout: float = 10.0) -> tuple[bool, str]:

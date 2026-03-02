@@ -35,7 +35,16 @@ class Project(Base):
     cascade_enabled: Mapped[Optional[bool]] = mapped_column(Boolean, default=True, nullable=True)
     max_cascade_attempts: Mapped[Optional[int]] = mapped_column(Integer, default=2, nullable=True)
 
+    # Routing preference columns (added by migration 002)
+    cost_quality_bias: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
+    speed_quality_bias: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
+    cascade_enabled: Mapped[Optional[bool]] = mapped_column(nullable=True, default=None)
+    max_cascade_attempts: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    # Quota column (added by migration 004)
+    monthly_spend_limit_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
+
     usage_records: Mapped[List["UsageRecord"]] = relationship(back_populates="project")
+    webhooks: Mapped[List["Webhook"]] = relationship(back_populates="project")
     file_hashes: Mapped[List["FileHashEntry"]] = relationship(back_populates="project")
     embedding_chunks: Mapped[List["EmbeddingChunk"]] = relationship(back_populates="project")
     plugin_tools: Mapped[List["PluginTool"]] = relationship(back_populates="project")
@@ -135,6 +144,24 @@ class RepoNode(Base):
 
     __table_args__ = (
         Index("ix_reponode_project_path", "project_id", "file_path", unique=True),
+    )
+
+
+class Webhook(Base):
+    __tablename__ = "webhooks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("projects.id"), nullable=True)
+    url: Mapped[str] = mapped_column(String(1024), nullable=False)
+    secret: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    events: Mapped[str] = mapped_column(String(255), default="*")  # glob pattern, e.g. "*" or "request.*,error.*"
+    is_active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    project: Mapped[Optional["Project"]] = relationship(back_populates="webhooks")
+
+    __table_args__ = (
+        Index("ix_webhook_project", "project_id"),
     )
 
 
@@ -314,6 +341,22 @@ async def create_tables():
              "index sessions expires"),
             ("CREATE INDEX IF NOT EXISTS idx_model_settings_project ON model_settings(project_id)",
              "index model_settings project"),
+            # Quota and webhooks (migration 004/005)
+            ("ALTER TABLE projects ADD COLUMN IF NOT EXISTS monthly_spend_limit_usd FLOAT DEFAULT NULL",
+             "add monthly_spend_limit_usd to projects"),
+            ("""CREATE TABLE IF NOT EXISTS webhooks (
+                id SERIAL PRIMARY KEY,
+                project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+                url VARCHAR(1024) NOT NULL,
+                secret VARCHAR(255),
+                events VARCHAR(255) DEFAULT '*',
+                is_active BOOLEAN DEFAULT true,
+                created_at TIMESTAMP DEFAULT NOW()
+            )""", "create webhooks table"),
+            ("CREATE INDEX IF NOT EXISTS ix_webhook_project ON webhooks(project_id)",
+             "index webhooks project_id"),
+            ("CREATE INDEX IF NOT EXISTS ix_usage_project_cost ON usage_records(project_id, timestamp, cost_usd)",
+             "index usage_records for quota queries"),
             # Default admin user (password: changeme)
             # Hash generated with: bcrypt.hashpw(b'changeme', bcrypt.gensalt()).decode()
             ("""INSERT INTO users (email, password_hash, display_name, role)
@@ -482,11 +525,111 @@ async def record_usage_to_db(
         log.warning("record_usage_to_db failed: %r", e)
 
 
+async def check_project_quota(project_id: int) -> None:
+    """
+    Raise HTTP 402 if the project has exceeded its monthly spend limit.
+    Results are cached in Redis for 60s to avoid per-request DB queries.
+    """
+    if not db_ready:
+        return
+    try:
+        from gateway.cache import rds
+        from datetime import datetime
+        import asyncio
+        from fastapi import HTTPException
+
+        month_key = datetime.utcnow().strftime("%Y-%m")
+        cache_key = f"quota:{project_id}:{month_key}"
+
+        # Check Redis cache first
+        if rds:
+            cached = rds.get(cache_key)
+            if cached == b"over":
+                raise HTTPException(status_code=402, detail="Monthly spend quota exceeded")
+            if cached == b"ok":
+                return
+
+        async with get_session() as session:
+            # Get project quota
+            from sqlalchemy import select
+            result = await session.execute(
+                select(Project.monthly_spend_limit_usd).where(Project.id == project_id)
+            )
+            row = result.first()
+            if not row or row[0] is None:
+                if rds:
+                    rds.setex(cache_key, 60, b"ok")
+                return
+            limit = row[0]
+
+            # Sum this month's spend
+            from sqlalchemy import func as sqlfunc, and_
+            first_of_month = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            spend_result = await session.execute(
+                select(sqlfunc.coalesce(sqlfunc.sum(UsageRecord.cost_usd), 0.0)).where(
+                    and_(
+                        UsageRecord.project_id == project_id,
+                        UsageRecord.timestamp >= first_of_month,
+                    )
+                )
+            )
+            monthly_spend = spend_result.scalar() or 0.0
+
+        if monthly_spend >= limit:
+            if rds:
+                rds.setex(cache_key, 60, b"over")
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=402,
+                detail=f"Monthly spend quota exceeded (${monthly_spend:.4f} / ${limit:.2f})"
+            )
+        else:
+            if rds:
+                rds.setex(cache_key, 60, b"ok")
+    except Exception as e:
+        # Import here to avoid circular imports at module init time
+        from fastapi import HTTPException
+        if isinstance(e, HTTPException):
+            raise
+        log.warning("check_project_quota failed: %r", e)
+
+
 COST_PER_1K_TOKENS = {
+    # Anthropic
     "claude-sonnet-4-0": {"input": 0.003, "output": 0.015},
     "claude-opus-4-5": {"input": 0.015, "output": 0.075},
     "claude-3-5-sonnet-20241022": {"input": 0.003, "output": 0.015},
+    "claude-3-5-haiku-20241022": {"input": 0.0008, "output": 0.004},
     "claude-3-opus-20240229": {"input": 0.015, "output": 0.075},
+    "claude-3-haiku-20240307": {"input": 0.00025, "output": 0.00125},
+    # OpenAI
+    "gpt-4o": {"input": 0.0025, "output": 0.01},
+    "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
+    "gpt-4-turbo": {"input": 0.01, "output": 0.03},
+    "gpt-4": {"input": 0.03, "output": 0.06},
+    "gpt-3.5-turbo": {"input": 0.0005, "output": 0.0015},
+    "o1": {"input": 0.015, "output": 0.06},
+    "o1-mini": {"input": 0.003, "output": 0.012},
+    "o3-mini": {"input": 0.0011, "output": 0.0044},
+    # OpenAI embeddings (output=0)
+    "text-embedding-3-small": {"input": 0.00002, "output": 0.0},
+    "text-embedding-3-large": {"input": 0.00013, "output": 0.0},
+    "text-embedding-ada-002": {"input": 0.0001, "output": 0.0},
+    # Gemini
+    "gemini-1.5-pro": {"input": 0.00125, "output": 0.005},
+    "gemini-1.5-flash": {"input": 0.000075, "output": 0.0003},
+    "gemini-2.0-flash": {"input": 0.0001, "output": 0.0004},
+    "gemini-2.0-flash-lite": {"input": 0.000075, "output": 0.0003},
+    # Groq (free tier, ~$0)
+    "llama3-8b-8192": {"input": 0.0, "output": 0.0},
+    "llama3-70b-8192": {"input": 0.0, "output": 0.0},
+    "mixtral-8x7b-32768": {"input": 0.0, "output": 0.0},
+    "gemma2-9b-it": {"input": 0.0, "output": 0.0},
+    # Ollama (self-hosted, $0)
+    "llama3.2": {"input": 0.0, "output": 0.0},
+    "llama3.1": {"input": 0.0, "output": 0.0},
+    "mistral": {"input": 0.0, "output": 0.0},
+    "nomic-embed-text": {"input": 0.0, "output": 0.0},
 }
 
 

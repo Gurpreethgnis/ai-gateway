@@ -1,3 +1,4 @@
+import asyncio
 import json
 import traceback
 from datetime import datetime
@@ -97,6 +98,14 @@ async def emit_error(
         except Exception as e:
             log.warning("Failed to emit error to Redis stream: %r", e)
 
+    # Dispatch webhook (fire-and-forget)
+    try:
+        from gateway.webhooks import dispatch as _dispatch
+        proj_int = int(project_id) if project_id and str(project_id).isdigit() else None
+        asyncio.create_task(_dispatch("error.upstream", event.to_dict(), project_id=proj_int))
+    except Exception:
+        pass
+
 
 async def emit_request(
     cf_ray: str,
@@ -135,6 +144,14 @@ async def emit_request(
             )
         except Exception as e:
             log.warning("Failed to emit request to Redis stream: %r", e)
+
+    # Dispatch webhook (fire-and-forget)
+    try:
+        from gateway.webhooks import dispatch as _dispatch
+        proj_int = int(project_id) if project_id and str(project_id).isdigit() else None
+        asyncio.create_task(_dispatch("request.complete", event.to_dict(), project_id=proj_int))
+    except Exception:
+        pass
 
 
 async def get_recent_errors(count: int = 100) -> List[Dict[str, Any]]:

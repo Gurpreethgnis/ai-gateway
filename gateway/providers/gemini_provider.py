@@ -48,7 +48,23 @@ class GeminiProvider(BaseProvider):
     
     def get_models(self) -> List[str]:
         return ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash"]
-    
+
+    async def embed(self, input_list: List[str], model: str, **kwargs) -> dict:
+        """Generate embeddings using Gemini text-embedding-004."""
+        import asyncio
+        embed_model = "models/text-embedding-004"
+        results = []
+        for i, text_item in enumerate(input_list):
+            result = await asyncio.to_thread(
+                self.client.embed_content, model=embed_model, content=text_item
+            )
+            results.append({"object": "embedding", "embedding": result["embedding"], "index": i})
+        return {
+            "data": results,
+            "model": embed_model,
+            "usage": {"prompt_tokens": 0, "total_tokens": 0},
+        }
+
     def _normalize_system_instruction(self, system: Any) -> Optional[str]:
         """Normalize system prompt to a plain string. Accepts Anthropic-style blocks (type, text, cache_control)."""
         if system is None:

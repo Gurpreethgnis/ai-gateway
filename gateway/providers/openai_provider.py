@@ -271,3 +271,19 @@ class OpenAIProvider(BaseProvider):
     def from_canonical(self, messages: List[CanonicalMessage]) -> List[Dict[str, Any]]:
         """Convert canonical format back into OpenAI-compatible messages."""
         return canonical_to_openai_messages(messages)
+
+    async def embed(self, input_list: List[str], model: str, **kwargs) -> dict:
+        """Generate embeddings using OpenAI embeddings API."""
+        model_id = self.normalize_model_id(model) or "text-embedding-3-small"
+        response = await self.client.embeddings.create(model=model_id, input=input_list)
+        return {
+            "data": [
+                {"object": "embedding", "embedding": e.embedding, "index": i}
+                for i, e in enumerate(response.data)
+            ],
+            "model": response.model,
+            "usage": {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "total_tokens": response.usage.total_tokens,
+            },
+        }

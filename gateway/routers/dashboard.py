@@ -228,7 +228,16 @@ DASHBOARD_HTML = """
 
         <!-- Routing Preferences Section -->
         <div id="routing-prefs" class="card" style="margin-bottom: 2rem; padding: 1.5rem;">
-            <h2 style="font-size: 1.25rem; margin-bottom: 1rem;">Routing Preferences</h2>
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
+                <h2 style="font-size: 1.25rem; margin: 0;">Routing Preferences</h2>
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                    <label class="card-label" style="margin: 0; white-space: nowrap;">Project:</label>
+                    <select id="project-selector"
+                            style="padding: 0.4rem 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 0.5rem; color: var(--text); font-size: 0.875rem; cursor: pointer;">
+                        <option value="">Loading…</option>
+                    </select>
+                </div>
+            </div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem;">
                 <div>
                     <label class="card-label">Cost ↔ Quality Trade-off</label>
@@ -294,9 +303,37 @@ DASHBOARD_HTML = """
             });
 
             let dashboardModels = [];
+
+            function _selectedProjectId() {
+                const sel = document.getElementById('project-selector');
+                return sel ? sel.value : '';
+            }
+
+            async function loadProjects() {
+                try {
+                    const resp = await fetch('/api/projects');
+                    if (!resp.ok) return;
+                    const projects = await resp.json();
+                    const sel = document.getElementById('project-selector');
+                    if (!sel) return;
+                    if (!projects || projects.length === 0) {
+                        sel.innerHTML = '<option value="">No projects</option>';
+                        return;
+                    }
+                    sel.innerHTML = projects.map(p =>
+                        `<option value="${p.id}">${p.name}</option>`
+                    ).join('');
+                    // Reload prefs and models for the newly selected project
+                    loadPreferences();
+                    loadModels();
+                } catch (e) { console.warn('Load projects failed:', e); }
+            }
+
             async function loadPreferences() {
                 try {
-                    const resp = await fetch('/api/preferences');
+                    const pid = _selectedProjectId();
+                    const url = pid ? `/api/preferences?project_id=${pid}` : '/api/preferences';
+                    const resp = await fetch(url);
                     if (!resp.ok) return;
                     const prefs = await resp.json();
                     const costEl = document.getElementById('cost-quality');
@@ -398,8 +435,9 @@ DASHBOARD_HTML = """
                 warning.style.display = 'none';
                 warning.textContent = '';
             }
-
             async function savePreferences() {
+                const pid = _selectedProjectId();
+                const url = pid ? `/api/preferences?project_id=${pid}` : '/api/preferences';
                 const maxCascadeEl = document.getElementById('max-cascade-attempts');
                 const maxCascade = maxCascadeEl ? Math.max(1, Math.min(5, parseInt(maxCascadeEl.value, 10) || 3)) : 3;
                 const prefs = {
@@ -409,7 +447,7 @@ DASHBOARD_HTML = """
                     max_cascade_attempts: maxCascade
                 };
                 try {
-                    const resp = await fetch('/api/preferences', {
+                    const resp = await fetch(url, {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(prefs)
@@ -445,24 +483,48 @@ DASHBOARD_HTML = """
         </div>
 
         <h2 style="margin-bottom: 1.5rem; font-size: 1.25rem;">Recent Requests</h2>
-        <div class="table-container">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Timestamp</th>
-                        <th>Model</th>
-                        <th>Status</th>
-                        <th>Input</th>
-                        <th>Cached</th>
-                        <th>Gateway</th>
-                        <th>Output</th>
-                        <th>Savings</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {{RECENT_ROWS}}
-                </tbody>
-            </table>
+
+        <!-- Audit Log Panel (JS-driven) -->
+        <div class="card" style="margin-bottom: 2rem; padding: 1.5rem;">
+            <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap;">
+                <h2 style="font-size: 1.125rem; margin: 0; flex: 1;">Audit Log</h2>
+                <input type="text" id="audit-model-filter" placeholder="Filter by model…"
+                       style="padding: 0.4rem 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 0.5rem; color: var(--text); font-size: 0.85rem; width: 160px;">
+                <label style="display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; cursor: pointer;">
+                    <input type="checkbox" id="audit-cached-only" style="accent-color: var(--primary);"> Cached only
+                </label>
+                <button onclick="loadAuditLog(1)" class="refresh-btn" style="padding: 0.4rem 0.9rem;">Refresh</button>
+                <a id="audit-csv-link" href="/api/usage?format=csv" target="_blank"
+                   style="padding: 0.4rem 0.9rem; background: var(--bg); border: 1px solid var(--border); border-radius: 0.5rem; color: var(--text-dim); font-size: 0.85rem; text-decoration: none;">
+                    ⬇ CSV
+                </a>
+            </div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Timestamp</th>
+                            <th>Model</th>
+                            <th>Input</th>
+                            <th>Output</th>
+                            <th>Cost (USD)</th>
+                            <th>Cached</th>
+                            <th>CF-Ray</th>
+                        </tr>
+                    </thead>
+                    <tbody id="audit-log-tbody">
+                        <tr><td colspan="7" style="text-align:center; color: var(--text-dim); padding: 2rem;">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 0.75rem; font-size: 0.85rem; color: var(--text-dim);">
+                <span id="audit-total-label"></span>
+                <div style="display: flex; gap: 0.5rem;">
+                    <button id="audit-prev" onclick="auditChangePage(-1)" class="refresh-btn" style="padding: 0.3rem 0.7rem;" disabled>← Prev</button>
+                    <span id="audit-page-label" style="align-self: center;"></span>
+                    <button id="audit-next" onclick="auditChangePage(1)" class="refresh-btn" style="padding: 0.3rem 0.7rem;">Next →</button>
+                </div>
+            </div>
         </div>
 
         <!-- Model Manager Section -->
@@ -512,6 +574,37 @@ DASHBOARD_HTML = """
             </div>
         </div>
 
+        <!-- Webhooks Section -->
+        <div id="webhooks-panel" class="card" style="margin-top: 2rem; padding: 1.5rem;">
+            <h2 style="font-size: 1.25rem; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+                <span>🔔</span> Webhooks
+            </h2>
+            <p style="color: var(--text-dim); margin-bottom: 1rem; font-size: 0.875rem;">
+                Receive HTTP POST notifications for gateway events. Use <code>*</code> to match all events or
+                comma-separated glob patterns like <code>request.*,error.*</code>.
+            </p>
+            <!-- Add Webhook Form -->
+            <div style="display: grid; grid-template-columns: 2fr 1fr 1fr auto; gap: 0.5rem; margin-bottom: 1.5rem; align-items: end;">
+                <div>
+                    <label class="card-label">URL</label>
+                    <input type="url" id="wh-url" placeholder="https://…" style="width: 100%; padding: 0.6rem; background: var(--bg); border: 1px solid var(--border); border-radius: 0.5rem; color: var(--text);">
+                </div>
+                <div>
+                    <label class="card-label">Events (glob)</label>
+                    <input type="text" id="wh-events" value="*" style="width: 100%; padding: 0.6rem; background: var(--bg); border: 1px solid var(--border); border-radius: 0.5rem; color: var(--text);">
+                </div>
+                <div>
+                    <label class="card-label">Secret (optional)</label>
+                    <input type="password" id="wh-secret" placeholder="HMAC secret" style="width: 100%; padding: 0.6rem; background: var(--bg); border: 1px solid var(--border); border-radius: 0.5rem; color: var(--text);">
+                </div>
+                <button onclick="addWebhook()" class="refresh-btn">Add</button>
+            </div>
+            <!-- Webhooks List -->
+            <div id="webhooks-list">
+                <div style="text-align: center; color: var(--text-dim); padding: 1rem;">Loading webhooks…</div>
+            </div>
+        </div>
+
         <!-- Model Manager Script -->
         <script>
             // Logout function
@@ -526,19 +619,31 @@ DASHBOARD_HTML = """
             
             // Load models and preferences on page load
             document.addEventListener('DOMContentLoaded', function() {
-                loadPreferences();
-                loadModels();
+                loadProjects();  // populates selector, then triggers loadPreferences + loadModels
                 loadOllamaModels();
                 loadProviderSummary();
                 loadRoutingTrace();
+                loadAuditLog(1);
+                loadWebhooks();
                 setInterval(loadProviderSummary, 15000);
                 setInterval(loadRoutingTrace, 5000);
+
+                // Reload prefs+models when user switches project
+                const sel = document.getElementById('project-selector');
+                if (sel) {
+                    sel.addEventListener('change', function() {
+                        loadPreferences();
+                        loadModels();
+                    });
+                }
             });
             
             async function loadModels() {
                 const container = document.getElementById('model-list');
                 try {
-                    const resp = await fetch('/api/models');
+                    const pid = _selectedProjectId();
+                    const url = pid ? `/api/models?project_id=${pid}` : '/api/models';
+                    const resp = await fetch(url);
                     if (!resp.ok) {
                         container.innerHTML = '<div style="color: var(--error);">Failed to load models. API returned: ' + resp.status + '</div>';
                         return;
@@ -590,7 +695,11 @@ DASHBOARD_HTML = """
             
             async function toggleModel(modelId, enabled) {
                 try {
-                    const resp = await fetch(`/api/models/${encodeURIComponent(modelId)}/enabled`, {
+                    const pid = _selectedProjectId();
+                    const url = pid
+                        ? `/api/models/${encodeURIComponent(modelId)}/enabled?project_id=${pid}`
+                        : `/api/models/${encodeURIComponent(modelId)}/enabled`;
+                    const resp = await fetch(url, {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ is_enabled: enabled })
@@ -745,6 +854,136 @@ DASHBOARD_HTML = """
                 } catch (e) {
                     alert('Error: ' + e.message);
                 }
+            }
+
+            // ── Audit Log ────────────────────────────────────────────────────
+            let _auditPage = 1;
+
+            function auditChangePage(delta) {
+                _auditPage = Math.max(1, _auditPage + delta);
+                loadAuditLog(_auditPage);
+            }
+
+            async function loadAuditLog(page) {
+                _auditPage = page || 1;
+                const tbody = document.getElementById('audit-log-tbody');
+                if (!tbody) return;
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-dim);padding:1.5rem;">Loading…</td></tr>';
+
+                const model = (document.getElementById('audit-model-filter') || {}).value || '';
+                const cachedOnly = (document.getElementById('audit-cached-only') || {}).checked ? '&cached_only=true' : '';
+                const pid = _selectedProjectId();
+                const pidParam = pid ? `&project_id=${pid}` : '';
+
+                // Update CSV link
+                const csvLink = document.getElementById('audit-csv-link');
+                if (csvLink) csvLink.href = `/api/usage?format=csv${pidParam}${model ? '&model=' + encodeURIComponent(model) : ''}${cachedOnly}`;
+
+                try {
+                    const url = `/api/usage?page=${_auditPage}&per_page=25${pidParam}${model ? '&model=' + encodeURIComponent(model) : ''}${cachedOnly}`;
+                    const resp = await fetch(url);
+                    if (!resp.ok) { tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#ef4444;">Failed to load audit log</td></tr>'; return; }
+                    const data = await resp.json();
+                    const records = data.records || [];
+
+                    document.getElementById('audit-total-label').textContent = `${data.total || 0} total records`;
+                    const totalPages = Math.ceil((data.total || 0) / 25) || 1;
+                    document.getElementById('audit-page-label').textContent = `Page ${_auditPage} / ${totalPages}`;
+                    document.getElementById('audit-prev').disabled = _auditPage <= 1;
+                    document.getElementById('audit-next').disabled = _auditPage >= totalPages;
+
+                    if (records.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-dim);padding:1.5rem;">No records found</td></tr>';
+                        return;
+                    }
+
+                    tbody.innerHTML = records.map(r => {
+                        const ts = r.timestamp ? r.timestamp.replace('T', ' ').slice(0, 19) : '—';
+                        const cached = r.cached
+                            ? '<span style="color:#10b981;">✓</span>'
+                            : '<span style="color:var(--text-dim);">—</span>';
+                        return `<tr>
+                            <td style="font-size:0.8rem;white-space:nowrap;">${ts}</td>
+                            <td style="font-size:0.85rem;">${r.model || '—'}</td>
+                            <td>${(r.input_tokens || 0).toLocaleString()}</td>
+                            <td>${(r.output_tokens || 0).toLocaleString()}</td>
+                            <td>$${(r.cost_usd || 0).toFixed(6)}</td>
+                            <td style="text-align:center;">${cached}</td>
+                            <td style="font-size:0.75rem;color:var(--text-dim);">${r.cf_ray || '—'}</td>
+                        </tr>`;
+                    }).join('');
+                } catch (e) {
+                    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:#ef4444;">Error: ${e.message}</td></tr>`;
+                }
+            }
+
+            // ── Webhooks ─────────────────────────────────────────────────────
+            async function loadWebhooks() {
+                const container = document.getElementById('webhooks-list');
+                if (!container) return;
+                try {
+                    const pid = _selectedProjectId();
+                    const pidParam = pid ? `?project_id=${pid}` : '';
+                    const resp = await fetch(`/api/webhooks${pidParam}`);
+                    if (!resp.ok) { container.innerHTML = '<div style="color:#ef4444;">Failed to load webhooks</div>'; return; }
+                    const data = await resp.json();
+                    const hooks = data.webhooks || [];
+                    if (hooks.length === 0) {
+                        container.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:1rem;">No webhooks configured yet.</div>';
+                        return;
+                    }
+                    container.innerHTML = hooks.map(wh => `
+                        <div style="display:flex;align-items:center;gap:1rem;padding:0.75rem;background:var(--bg);border-radius:0.5rem;border:1px solid var(--border);margin-bottom:0.5rem;">
+                            <span style="flex:1;font-size:0.875rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${wh.url}</span>
+                            <code style="font-size:0.75rem;color:var(--text-dim);">${wh.events}</code>
+                            ${wh.has_secret ? '<span style="font-size:0.75rem;color:#10b981;">🔐 signed</span>' : ''}
+                            <button onclick="testWebhook(${wh.id})" class="refresh-btn" style="padding:0.25rem 0.6rem;font-size:0.8rem;">Test</button>
+                            <button onclick="deleteWebhook(${wh.id})" style="background:transparent;border:1px solid #ef4444;color:#ef4444;padding:0.25rem 0.6rem;border-radius:0.375rem;cursor:pointer;font-size:0.8rem;">✕</button>
+                        </div>
+                    `).join('');
+                } catch (e) {
+                    container.innerHTML = `<div style="color:#ef4444;">Error: ${e.message}</div>`;
+                }
+            }
+
+            async function addWebhook() {
+                const url = (document.getElementById('wh-url') || {}).value || '';
+                const events = (document.getElementById('wh-events') || {}).value || '*';
+                const secret = (document.getElementById('wh-secret') || {}).value || '';
+                if (!url) { alert('URL is required'); return; }
+                const pid = _selectedProjectId();
+                const body = { url, events, secret: secret || null, project_id: pid ? parseInt(pid) : null };
+                try {
+                    const resp = await fetch('/api/webhooks', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body)
+                    });
+                    if (resp.ok) {
+                        document.getElementById('wh-url').value = '';
+                        document.getElementById('wh-secret').value = '';
+                        loadWebhooks();
+                    } else {
+                        const err = await resp.json();
+                        alert('Failed: ' + (err.detail || JSON.stringify(err)));
+                    }
+                } catch (e) { alert('Error: ' + e.message); }
+            }
+
+            async function deleteWebhook(id) {
+                if (!confirm('Remove this webhook?')) return;
+                try {
+                    await fetch(`/api/webhooks/${id}`, { method: 'DELETE' });
+                    loadWebhooks();
+                } catch (e) { alert('Error: ' + e.message); }
+            }
+
+            async function testWebhook(id) {
+                try {
+                    const resp = await fetch(`/api/webhooks/${id}/test`, { method: 'POST' });
+                    if (resp.ok) alert('Test delivery sent!');
+                    else { const err = await resp.json(); alert('Failed: ' + (err.detail || 'Unknown error')); }
+                } catch (e) { alert('Error: ' + e.message); }
             }
         </script>
         
@@ -975,7 +1214,6 @@ def _render_dashboard(stats: dict, recent: list[dict], full: bool, user: dict = 
     html = html.replace("{{EFFICIENCY}}", f"{efficiency:.1f}%")
     html = html.replace("{{SAVINGS_USD}}", f"${savings_usd:.4f}")
     html = html.replace("{{REQUEST_COUNT}}", f"{request_count:,}")
-    html = html.replace("{{RECENT_ROWS}}", rows_html)
     
     return html
 

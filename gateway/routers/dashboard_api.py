@@ -123,6 +123,32 @@ async def _get_first_project_id() -> Optional[int]:
         return row[0] if row else None
 
 
+# =============================================================================
+# Projects List Endpoint (used by dashboard project selector)
+# =============================================================================
+
+class ProjectInfo(BaseModel):
+    id: int
+    name: str
+
+
+@router.get("/projects")
+async def list_projects(
+    request: Request,
+    user: Optional[dict] = Depends(optional_auth),
+) -> List[ProjectInfo]:
+    """List all active projects for the dashboard project selector."""
+    from gateway.db import get_session
+    from sqlalchemy import text
+
+    async with get_session() as session:
+        result = await session.execute(
+            text("SELECT id, name FROM projects WHERE is_active = true ORDER BY id ASC")
+        )
+        rows = result.fetchall()
+        return [ProjectInfo(id=row[0], name=row[1]) for row in rows]
+
+
 @router.get("/preferences")
 async def get_preferences(
     request: Request,
@@ -282,10 +308,9 @@ async def get_models(
                 text("""
                     SELECT ms.model_id, ms.is_enabled, ms.custom_quality_rating
                     FROM model_settings ms
-                    JOIN projects p ON ms.project_id = p.id
-                    WHERE p.api_key = :project_id
+                    WHERE ms.project_id = :project_id
                 """),
-                {"project_id": project_id},
+                {"project_id": int(project_id)},
             )
             
             for row in result.fetchall():
@@ -366,16 +391,7 @@ async def set_model_enabled(
 
     async with get_session() as session:
         # Get project ID
-        result = await session.execute(
-            text("SELECT id FROM projects WHERE api_key = :api_key"),
-            {"api_key": project_id},
-        )
-        project_row = result.fetchone()
-        
-        if not project_row:
-            raise HTTPException(status_code=404, detail="Project not found")
-        
-        project_db_id = project_row[0]
+        project_db_id = int(project_id)
         
         # Upsert model settings
         await session.execute(
@@ -640,17 +656,15 @@ async def get_stats(
         # Get request counts by model
         result = await session.execute(
             text("""
-                SELECT model, COUNT(*) as count, 
-                       SUM(prompt_tokens + completion_tokens) as tokens,
-                       SUM(COALESCE(estimated_cost, 0)) as cost
-                FROM metrics
-                WHERE created_at > :since
-                AND (:project_id IS NULL OR project_id = (
-                    SELECT id FROM projects WHERE api_key = :project_id
-                ))
+                SELECT model, COUNT(*) as count,
+                       SUM(input_tokens + output_tokens) as tokens,
+                       SUM(COALESCE(cost_usd, 0)) as cost
+                FROM usage_records
+                WHERE timestamp > :since
+                AND (:project_id IS NULL OR project_id = :project_id_int)
                 GROUP BY model
             """),
-            {"since": since, "project_id": project_id},
+            {"since": since, "project_id": project_id, "project_id_int": int(project_id) if project_id else None},
         )
         
         requests_by_model = {}
@@ -673,16 +687,14 @@ async def get_stats(
         # Get cache hits
         cache_result = await session.execute(
             text("""
-                SELECT 
-                    COUNT(*) FILTER (WHERE cache_hit = true) as hits,
+                SELECT
+                    COUNT(*) FILTER (WHERE cached = true) as hits,
                     COUNT(*) as total
-                FROM metrics
-                WHERE created_at > :since
-                AND (:project_id IS NULL OR project_id = (
-                    SELECT id FROM projects WHERE api_key = :project_id
-                ))
+                FROM usage_records
+                WHERE timestamp > :since
+                AND (:project_id IS NULL OR project_id = :project_id_int)
             """),
-            {"since": since, "project_id": project_id},
+            {"since": since, "project_id": project_id, "project_id_int": int(project_id) if project_id else None},
         )
         cache_row = cache_result.fetchone()
         cache_hits = cache_row[0] or 0
@@ -849,3 +861,267 @@ async def get_routing_trace(
 
     events = await get_recent_routing_trace(limit=max(1, min(limit, 100)))
     return {"events": events}
+
+
+# =============================================================================
+# Audit Log (usage records)
+# =============================================================================
+
+@router.get("/usage")
+async def get_usage_log(
+    request: Request,
+    page: int = 1,
+    per_page: int = 50,
+    project_id: Optional[int] = None,
+    model: Optional[str] = None,
+    cached_only: Optional[bool] = None,
+    format: Optional[str] = None,
+    user: Optional[dict] = Depends(optional_auth),
+):
+    """
+    Paginated audit log of usage records.  Pass ``format=csv`` to download CSV.
+    """
+    import csv
+    import io
+    from fastapi.responses import StreamingResponse
+    from sqlalchemy import select, and_
+    from gateway.db import get_session, UsageRecord
+
+    per_page = max(1, min(per_page, 200))
+    page = max(1, page)
+    offset = (page - 1) * per_page
+
+    filters = []
+    if project_id is not None:
+        filters.append(UsageRecord.project_id == project_id)
+    if model:
+        filters.append(UsageRecord.model.ilike(f"%{model}%"))
+    if cached_only is True:
+        filters.append(UsageRecord.cached == True)  # noqa: E712
+
+    async with get_session() as session:
+        from sqlalchemy import func as sqlfunc
+        count_q = select(sqlfunc.count(UsageRecord.id))
+        if filters:
+            count_q = count_q.where(and_(*filters))
+        total = (await session.execute(count_q)).scalar() or 0
+
+        q = select(UsageRecord).order_by(UsageRecord.timestamp.desc()).offset(offset).limit(per_page)
+        if filters:
+            q = q.where(and_(*filters))
+        rows = (await session.execute(q)).scalars().all()
+
+    records = [
+        {
+            "id": r.id,
+            "project_id": r.project_id,
+            "model": r.model,
+            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+            "input_tokens": r.input_tokens,
+            "cache_read_input_tokens": r.cache_read_input_tokens,
+            "cache_creation_input_tokens": r.cache_creation_input_tokens,
+            "gateway_tokens_saved": r.gateway_tokens_saved,
+            "output_tokens": r.output_tokens,
+            "cost_usd": r.cost_usd,
+            "cached": r.cached,
+            "cf_ray": r.cf_ray,
+        }
+        for r in rows
+    ]
+
+    if format == "csv":
+        buf = io.StringIO()
+        if records:
+            writer = csv.DictWriter(buf, fieldnames=list(records[0].keys()))
+            writer.writeheader()
+            writer.writerows(records)
+        buf.seek(0)
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=usage_log.csv"},
+        )
+
+    return {"total": total, "page": page, "per_page": per_page, "records": records}
+
+
+# =============================================================================
+# Quota management
+# =============================================================================
+
+@router.get("/projects/{project_id}/quota")
+async def get_project_quota(
+    project_id: int,
+    request: Request,
+    user: Optional[dict] = Depends(optional_auth),
+):
+    """Return current monthly spend vs. quota limit for a project."""
+    from sqlalchemy import select, and_, func as sqlfunc
+    from gateway.db import get_session, Project, UsageRecord
+
+    async with get_session() as session:
+        row = (await session.execute(
+            select(Project.monthly_spend_limit_usd).where(Project.id == project_id)
+        )).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Project not found")
+        limit = row[0]
+
+        now = datetime.utcnow()
+        first_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        spend = (await session.execute(
+            select(sqlfunc.coalesce(sqlfunc.sum(UsageRecord.cost_usd), 0.0)).where(
+                and_(
+                    UsageRecord.project_id == project_id,
+                    UsageRecord.timestamp >= first_of_month,
+                )
+            )
+        )).scalar() or 0.0
+
+    return {
+        "project_id": project_id,
+        "monthly_spend_usd": round(spend, 6),
+        "monthly_spend_limit_usd": limit,
+        "over_quota": (limit is not None and spend >= limit),
+    }
+
+
+@router.put("/projects/{project_id}/quota")
+async def set_project_quota(
+    project_id: int,
+    request: Request,
+    user: Optional[dict] = Depends(optional_auth),
+):
+    """Set (or clear) the monthly spend limit for a project. Send ``{"monthly_spend_limit_usd": 10.0}`` or ``null`` to remove."""
+    from sqlalchemy import select
+    from gateway.db import get_session, Project
+
+    body = await request.json()
+    new_limit = body.get("monthly_spend_limit_usd")  # None = remove limit
+
+    async with get_session() as session:
+        result = await session.execute(select(Project).where(Project.id == project_id))
+        proj = result.scalars().first()
+        if not proj:
+            raise HTTPException(status_code=404, detail="Project not found")
+        proj.monthly_spend_limit_usd = float(new_limit) if new_limit is not None else None
+        session.add(proj)
+
+    # Invalidate quota Redis cache
+    try:
+        from gateway.cache import rds
+        month_key = datetime.utcnow().strftime("%Y-%m")
+        if rds:
+            rds.delete(f"quota:{project_id}:{month_key}")
+    except Exception:
+        pass
+
+    return {"project_id": project_id, "monthly_spend_limit_usd": new_limit}
+
+
+# =============================================================================
+# Webhook CRUD
+# =============================================================================
+
+class WebhookCreate(BaseModel):
+    url: str
+    secret: Optional[str] = None
+    events: str = "*"
+    project_id: Optional[int] = None
+
+
+@router.get("/webhooks")
+async def list_webhooks(
+    request: Request,
+    project_id: Optional[int] = None,
+    user: Optional[dict] = Depends(optional_auth),
+):
+    from sqlalchemy import select
+    from gateway.db import get_session, Webhook
+
+    async with get_session() as session:
+        q = select(Webhook).where(Webhook.is_active == True)  # noqa: E712
+        if project_id is not None:
+            q = q.where(Webhook.project_id == project_id)
+        rows = (await session.execute(q)).scalars().all()
+
+    return {
+        "webhooks": [
+            {
+                "id": wh.id,
+                "project_id": wh.project_id,
+                "url": wh.url,
+                "events": wh.events,
+                "has_secret": bool(wh.secret),
+                "created_at": wh.created_at.isoformat() if wh.created_at else None,
+            }
+            for wh in rows
+        ]
+    }
+
+
+@router.post("/webhooks")
+async def create_webhook(
+    body: WebhookCreate,
+    request: Request,
+    user: Optional[dict] = Depends(optional_auth),
+):
+    from gateway.db import get_session, Webhook
+
+    async with get_session() as session:
+        wh = Webhook(
+            project_id=body.project_id,
+            url=body.url,
+            secret=body.secret or None,
+            events=body.events or "*",
+        )
+        session.add(wh)
+        await session.flush()
+        wh_id = wh.id
+
+    return {"id": wh_id, "url": body.url, "events": body.events}
+
+
+@router.delete("/webhooks/{webhook_id}")
+async def delete_webhook(
+    webhook_id: int,
+    request: Request,
+    user: Optional[dict] = Depends(optional_auth),
+):
+    from sqlalchemy import select
+    from gateway.db import get_session, Webhook
+
+    async with get_session() as session:
+        result = await session.execute(select(Webhook).where(Webhook.id == webhook_id))
+        wh = result.scalars().first()
+        if not wh:
+            raise HTTPException(status_code=404, detail="Webhook not found")
+        wh.is_active = False
+        session.add(wh)
+
+    return {"deleted": True, "id": webhook_id}
+
+
+@router.post("/webhooks/{webhook_id}/test")
+async def test_webhook(
+    webhook_id: int,
+    request: Request,
+    user: Optional[dict] = Depends(optional_auth),
+):
+    from sqlalchemy import select
+    from gateway.db import get_session, Webhook
+    from gateway.webhooks import fire_webhook
+
+    async with get_session() as session:
+        result = await session.execute(select(Webhook).where(Webhook.id == webhook_id))
+        wh = result.scalars().first()
+        if not wh:
+            raise HTTPException(status_code=404, detail="Webhook not found")
+        url, secret = wh.url, wh.secret
+
+    await fire_webhook(
+        url,
+        {"event": "webhook.test", "webhook_id": webhook_id, "message": "Test delivery from AI Gateway"},
+        secret=secret or None,
+    )
+    return {"sent": True, "url": url}

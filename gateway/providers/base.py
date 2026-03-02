@@ -146,6 +146,27 @@ class BaseProvider(ABC):
         """List of model IDs this provider can serve."""
         pass
     
+    async def embed(
+        self,
+        input_list: List[str],
+        model: str,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """
+        Generate embeddings for a list of texts.
+
+        Returns an OpenAI-compatible response dict:
+        {
+            "data": [{"object": "embedding", "embedding": [...], "index": 0}, ...],
+            "model": "...",
+            "usage": {"prompt_tokens": N, "total_tokens": N},
+        }
+
+        Providers that do not support embeddings should leave this unimplemented;
+        the default raises NotImplementedError so the caller can return HTTP 501.
+        """
+        raise NotImplementedError(f"{self.name} provider does not support embeddings")
+
     def normalize_model_id(self, model: str) -> str:
         """
         Normalize model ID for API call.

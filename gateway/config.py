@@ -184,6 +184,14 @@ COMPRESSION_MODEL = os.getenv("COMPRESSION_MODEL", "ollama/llama3.1:8b")
 ENABLE_DASHBOARD_AUTH = os.getenv("ENABLE_DASHBOARD_AUTH", "0") == "1"
 # Secret key for session tokens (auto-generated if not set)
 SESSION_SECRET_KEY = os.getenv("SESSION_SECRET_KEY", GATEWAY_API_KEY)
+
+# =============================================================================
+# Webhooks
+# =============================================================================
+# Global fallback webhook URL (fires on all events for all projects if set)
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+# HMAC-SHA256 signing secret for global WEBHOOK_URL
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 SESSION_EXPIRY_HOURS = int(os.getenv("SESSION_EXPIRY_HOURS", "24"))
 # Allow public registration
 ALLOW_REGISTRATION = os.getenv("ALLOW_REGISTRATION", "0") == "1"

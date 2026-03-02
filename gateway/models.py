@@ -36,3 +36,14 @@ class OAChatReq(BaseModel):
 
     class Config:
         extra = "allow"
+
+
+class EmbeddingRequest(BaseModel):
+    """OpenAI-compatible embedding request."""
+    input: Union[str, List[str]]
+    model: str = "text-embedding-3-small"
+    encoding_format: Optional[str] = "float"
+    dimensions: Optional[int] = None
+
+    class Config:
+        extra = "allow"

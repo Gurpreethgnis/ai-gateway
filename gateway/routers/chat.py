@@ -1,5 +1,6 @@
 import time
 import traceback
+from typing import Optional
 from fastapi import APIRouter, Request, HTTPException
 
 from gateway.models import ChatReq
@@ -68,12 +69,37 @@ async def chat(req: Request, body: ChatReq):
     if not body.provider and body.model in (None, "auto", "smartroute"):
         try:
             from gateway.config import ENABLE_SMART_ROUTING, ENABLE_CASCADE_ROUTING
-            
+
+            # Resolve project from bearer token so saved dashboard preferences are respected
+            chat_project_id: Optional[int] = None
+            chat_cost_bias: Optional[float] = None
+            chat_speed_bias: Optional[float] = None
+            try:
+                from gateway.projects import get_project_by_api_key as _get_proj
+                auth_hdr = req.headers.get("authorization", "")
+                if auth_hdr.lower().startswith("bearer "):
+                    _raw_key = auth_hdr.split(" ", 1)[1].strip()
+                    _proj = await _get_proj(_raw_key)
+                    if _proj:
+                        chat_project_id = _proj.id
+                        from gateway.db import get_session as _gs
+                        from sqlalchemy import text as _text
+                        async with _gs() as _sess:
+                            _row = (await _sess.execute(
+                                _text("SELECT cost_quality_bias, speed_quality_bias FROM projects WHERE id = :pid"),
+                                {"pid": chat_project_id},
+                            )).fetchone()
+                            if _row:
+                                chat_cost_bias = _row[0]
+                                chat_speed_bias = _row[1]
+            except Exception as _e:
+                log.debug("chat.py: could not resolve project prefs: %r", _e)
+
             if ENABLE_SMART_ROUTING:
                 messages = [{"role": m.role, "content": m.content} for m in body.messages]
-                # Load routing preferences (project_id=None uses first project so preferences still apply)
+                # Load routing preferences for this project (or defaults if no project)
                 from gateway.projects import get_routing_preferences
-                cost_bias, speed_bias, cascade_enabled_pref, max_cascade_attempts_pref = await get_routing_preferences(None)
+                cost_bias, speed_bias, cascade_enabled_pref, max_cascade_attempts_pref = await get_routing_preferences(chat_project_id)
 
                 if ENABLE_CASCADE_ROUTING and cascade_enabled_pref:
                     # Use cascade routing
@@ -81,7 +107,7 @@ async def chat(req: Request, body: ChatReq):
                     decision, local_response, cascade_metadata = await route_with_cascade(
                         messages=messages,
                         tools=[],  # Simple chat endpoint doesn't support tools
-                        project_id=None,
+                        project_id=chat_project_id,
                         system_prompt=body.system or "",
                         explicit_model=body.model,
                         cost_quality_bias=cost_bias,
@@ -89,7 +115,6 @@ async def chat(req: Request, body: ChatReq):
                         cascade_enabled=cascade_enabled_pref,
                         max_cascade_attempts=max_cascade_attempts_pref,
                     )
-                    
                     if local_response:
                         # Return local response immediately
                         log.info("CHAT cascade: returning local response")
@@ -104,7 +129,7 @@ async def chat(req: Request, body: ChatReq):
                     decision = await route_request(
                         messages=messages,
                         tools=[],
-                        project_id=None,
+                        project_id=chat_project_id,
                         explicit_model=body.model,
                         system_prompt=body.system or "",
                         cost_quality_bias=cost_bias,

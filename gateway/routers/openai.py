@@ -76,7 +76,7 @@ from gateway.prompt_cache_strategy import (
 from gateway.session_context import merge_session_context, persist_session_turn
 from gateway.routing_trace import record_routing_trace_event
 from gateway.telemetry import emit_error, emit_request
-from gateway.db import calculate_cost, record_usage_to_db
+from gateway.db import calculate_cost, record_usage_to_db, check_project_quota
 
 router = APIRouter()
 
@@ -462,6 +462,9 @@ async def openai_chat_completions(req: Request):
         for k, v in get_rate_limit_headers(rate_result).items():
             response.headers[k] = v
         return response
+
+    if project_id is not None:
+        await check_project_quota(project_id)
 
     oa_tools = oa_tools_from_body(parsed)
     aa_tools = anthropic_tools_from_openai(oa_tools)
@@ -2030,3 +2033,84 @@ async def list_skills_endpoint(req: Request):
             "User message: @<skill-id> at the start of message",
         ]
     }
+
+
+@router.post("/v1/embeddings")
+@router.post("/embeddings")
+async def create_embeddings(req: Request):
+    """OpenAI-compatible embeddings endpoint. Delegates to the configured provider."""
+    import json as _json
+    from gateway.models import EmbeddingRequest
+    from gateway.providers.registry import get_provider
+
+    body = await req.body()
+    try:
+        data = _json.loads(body)
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": {"message": "Invalid JSON"}})
+
+    try:
+        embed_req = EmbeddingRequest(**data)
+    except Exception as exc:
+        return JSONResponse(status_code=422, content={"error": {"message": str(exc)}})
+
+    # Normalise input to a list
+    input_list = embed_req.input if isinstance(embed_req.input, list) else [embed_req.input]
+
+    # Resolve provider from model prefix (e.g. "openai/text-embedding-3-small" → openai)
+    model = embed_req.model
+    provider_name: str | None = None
+    if "/" in model:
+        provider_name, model = model.split("/", 1)
+    else:
+        # default: prefer openai, fall back to ollama
+        for candidate in ("openai", "gemini", "ollama"):
+            try:
+                p = get_provider(candidate)
+                if p:
+                    provider_name = candidate
+                    break
+            except Exception:
+                pass
+
+    if not provider_name:
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"message": "No embedding-capable provider configured"}},
+        )
+
+    try:
+        provider = get_provider(provider_name)
+    except Exception as exc:
+        return JSONResponse(status_code=503, content={"error": {"message": str(exc)}})
+
+    if provider is None:
+        return JSONResponse(
+            status_code=501,
+            content={"error": {"message": f"Provider '{provider_name}' is not available"}},
+        )
+
+    # Providers that don't support embeddings
+    if provider_name in ("anthropic", "groq"):
+        return JSONResponse(
+            status_code=501,
+            content={"error": {"message": f"Provider '{provider_name}' does not support embeddings"}},
+        )
+
+    try:
+        result = await provider.embed(input_list=input_list, model=model)
+    except NotImplementedError:
+        return JSONResponse(
+            status_code=501,
+            content={"error": {"message": f"Provider '{provider_name}' does not support embeddings"}},
+        )
+    except Exception as exc:
+        return JSONResponse(status_code=502, content={"error": {"message": str(exc)}})
+
+    return JSONResponse(
+        content={
+            "object": "list",
+            **result,
+        },
+        headers={"X-Gateway": "claude-gateway", "X-Embedding-Provider": provider_name},
+    )

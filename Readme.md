@@ -190,31 +190,68 @@ curl -X POST https://your-gateway/v1/chat/completions \
 | **Observability** | Prometheus, Usage Tracking, Admin UI |
 | **Multi-tenant** | Projects, Per-project Config/Limits |
 | **Advanced** | Batch API, Memory, Plugins, Repo Map |
+| **Dashboard** | Project selector, per-project routing preferences, live preference→routing wiring |
 
-### 🚧 Community Roadmap
+### Recent Fixes (March 2026)
 
-These features would make excellent contributions:
+| Fix | Detail |
+|-----|--------|
+| **Dashboard preferences now affect routing** | Saved cost/speed bias sliders are read from DB before every routing decision — no longer ignored |
+| **Project selector in dashboard** | New dropdown lets you switch between projects; preferences and model toggles update per-project |
+| **`GET /api/projects` endpoint** | Dashboard-safe projects list (no admin key needed) |
+| **Fixed `api_key` column bug** | Dashboard API was querying a non-existent column; now correctly uses numeric project `id` |
+| **Fixed stats endpoint** | `GET /api/stats` now queries `usage_records` instead of the non-existent `metrics` table |
+| **Ollama CF Access fix** | Local Ollama URLs (localhost / private IPs) no longer require Cloudflare Access credentials |
+| **Migration 003** | Adds missing `progress`, `error`, `completed_at` columns to `ollama_pull_jobs` |
+| **Resolved merge conflicts** | Stale conflict markers removed from `openai.py` and `dashboard.py` |
 
-| Feature | Complexity | Description |
-|---------|------------|-------------|
-| **Learned Router (RouteLLM)** | Medium | Train router from logged outcomes |
-| **A/B Testing** | Medium | Model performance comparison |
-| **WebSocket Support** | Medium | Real-time bidirectional streaming |
-| **Embeddings API** | Easy | `/v1/embeddings` endpoint |
-| **Image Generation** | Medium | DALL-E, Stable Diffusion |
-| **Audio/Speech** | Medium | Whisper, TTS support |
-| **RAG Integration** | Hard | Built-in vector store |
-| **Agent Workflows** | Hard | Multi-step orchestration |
-| **SSO/SAML Auth** | Medium | Enterprise authentication |
-| **Usage Quotas/Billing** | Medium | Per-project billing |
-| **Request Audit Log** | Easy | Full request logging |
-| **Webhook Integrations** | Easy | Slack, Discord notifications |
-| **MCP Server Support** | Medium | Model Context Protocol |
+### New Features (Round 2)
+
+| Feature | Detail |
+|---------|--------|
+| **Embeddings API** | `POST /v1/embeddings` — dispatches to OpenAI, Gemini (`text-embedding-004`), or Ollama (`/api/embed`) providers; returns OpenAI-compatible response |
+| **Audit Log UI** | JS-driven paginated table in dashboard under "Recent Requests" — model filter, cached-only toggle, CSV export, `GET /api/usage` backend |
+| **Usage Quotas** | `monthly_spend_limit_usd` column on projects; enforced via `check_project_quota()` (HTTP 402) on every chat request; Redis 60s cache; `GET/PUT /api/projects/{id}/quota` endpoints |
+| **Webhooks** | Per-project webhook table; `GET/POST /api/webhooks`, delete and test endpoints; HMAC-SHA256 signed delivery; wired into telemetry on `request.complete` and `error.upstream` events; global `WEBHOOK_URL` env-var fallback |
+| **Expanded cost table** | `COST_PER_1K_TOKENS` now covers Anthropic, OpenAI (incl. embeddings), Gemini, Groq, and Ollama models |
+| **Migrations 004 & 005** | SQL files for `monthly_spend_limit_usd` column and `webhooks` table |
+
+### 🚧 Roadmap — Sorted by Doability
+
+> Items marked ✨ are recommended next steps given the current codebase.
+
+#### 🟢 Easy (days)
+
+| Feature | Description |
+|---------|-------------|
+| ✅ **Embeddings API** | `POST /v1/embeddings` — OpenAI-compatible, delegates to OpenAI / Gemini / Ollama providers. |
+| ✅ **Request Audit Log UI** | JS-driven paginated audit log in the dashboard with model/cached filters and CSV export. Served from `GET /api/usage`. |
+| ✅ **Webhook Integrations** | Per-project webhook CRUD (`GET/POST /api/webhooks`, delete, test). Signed HMAC-SHA256 delivery. Global env-var fallback (`WEBHOOK_URL`). |
+| ✅ **Usage Quotas / Billing** | Per-project monthly spend cap (`monthly_spend_limit_usd`). Enforced at request time (`POST /v1/chat/completions`), with 60s Redis cache. |
+
+#### 🟡 Medium (1–2 weeks)
+
+| Feature | Description |
+|---------|-------------|
+| **A/B Testing** | Split traffic between two models, compare latency/cost/quality in usage_records. Needs a split-config table and dashboard view. |
+| **WebSocket Support** | Real-time bidirectional streaming endpoint. FastAPI supports it natively; need to adapt the streaming response path. |
+| **MCP Server Support** | Model Context Protocol — expose gateway as an MCP server. Well-defined spec, medium integration effort. |
+| **Audio / Speech** | `/v1/audio/transcriptions` (Whisper) and `/v1/audio/speech` (TTS). OpenAI and Groq both expose Whisper; straightforward provider addition. |
+| **Image Generation** | `/v1/images/generations` — DALL-E 3 via OpenAI provider, Stable Diffusion via Ollama. New provider method + route. |
+| **Learned Router (RouteLLM)** | Train a lightweight classifier on logged routing outcomes from `routing_trace`. Requires data collection plumbing first. |
+
+#### 🔴 Hard (weeks+)
+
+| Feature | Description |
+|---------|-------------|
+| **SSO / SAML Auth** | Enterprise auth. Needs an auth library (python-saml / authlib) and session management overhaul. |
+| **RAG Integration** | Built-in vector store — pgvector already partially wired (`embedding_chunks` table), but chunking pipeline and retrieval API are missing. |
+| **Agent Workflows** | Multi-step orchestration with tool loops, planning, and state management. Architectural addition. |
 
 ### Contributing
 
 1. Fork the repository
-2. Pick a feature from the roadmap
+2. Pick a feature from the roadmap above (start with the 🟢 Easy ones)
 3. Create feature branch: `git checkout -b feature/your-feature`
 4. Submit a pull request
 

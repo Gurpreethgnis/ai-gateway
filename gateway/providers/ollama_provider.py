@@ -59,14 +59,24 @@ class OllamaProvider(BaseProvider):
         # but we conservatively return False for routing purposes
         return False
 
-    def _validate_model_allowed(self, model: str):
-        """Validate model against configured local allowlist."""
-        allowlist = getattr(config, "LOCAL_LLM_MODEL_ALLOWLIST", []) or []
-        if allowlist and model not in allowlist:
-            raise ValueError(f"Model '{model}' is not in LOCAL_LLM_MODEL_ALLOWLIST")
-
-    def _resolve_num_ctx(self, model: str, explicit_num_ctx: Optional[int] = None) -> int:
-        """Resolve context window to send to Ollama num_ctx."""
+    async def embed(self, input_list: List[str], model: str, **kwargs) -> dict:
+        """Generate embeddings using Ollama /api/embed endpoint."""
+        model_id = self.normalize_model_id(model) or getattr(config, "OLLAMA_EMBED_MODEL", "nomic-embed-text")
+        results = []
+        url = f"{self.base_url.rstrip('/')}/api/embed"
+        async with httpx.AsyncClient(headers=self._build_headers(), timeout=60.0) as client:
+            for i, text_item in enumerate(input_list):
+                resp = await client.post(url, json={"model": model_id, "input": text_item})
+                resp.raise_for_status()
+                data = resp.json()
+                embeddings = data.get("embeddings", [[]])
+                embedding = embeddings[0] if embeddings else []
+                results.append({"object": "embedding", "embedding": embedding, "index": i})
+        return {
+            "data": results,
+            "model": model_id,
+            "usage": {"prompt_tokens": 0, "total_tokens": 0},
+        }
         if isinstance(explicit_num_ctx, int) and explicit_num_ctx > 0:
             return explicit_num_ctx
 
