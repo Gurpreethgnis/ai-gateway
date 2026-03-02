@@ -14,7 +14,7 @@ jobs:
           RAILWAY_DEPLOY_HOOK_URL: ${{ secrets.RAILWAY_DEPLOY_HOOK_URL }}
         run: |
           if [ -z "$RAILWAY_DEPLOY_HOOK_URL" ]; then
-            echo "Missing RAILWAY_DEPLOY_HOOK_URL secret."
-            exit 1
+            echo "RAILWAY_DEPLOY_HOOK_URL not set — skipping deploy hook."
+            exit 0
           fi
           curl -sSf -X POST "$RAILWAY_DEPLOY_HOOK_URL"
